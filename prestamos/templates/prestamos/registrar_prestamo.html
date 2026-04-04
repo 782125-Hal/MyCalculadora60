@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+
+{% block title %}Registrar Préstamo{% endblock %}
+
+{% block content %}
+    <p>Bloque content desde base</p>
+    <h2>Registrar Nuevo Préstamo</h2>
+    <p>Complete los campos a continuación. Si viene de la calculadora, algunos campos estarán prellenados.</p>
+
+    <form method="post" class="form">
+        {% csrf_token %}
+        {{ form.as_p }}  <!-- Renderiza cada campo como párrafo; puedes usar {{ form }} para tabla o personalizar -->
+        <button type="submit" class="btn btn-success">Registrar Préstamo</button>
+    </form>
+
+    <a href="{% url 'prestamos:calculadora_financiera' %}" class="btn btn-secondary mt-3">Volver a Calculadora</a>
+{% endblock %}

@@ -1,0 +1,89 @@
+
+
+{% extends 'base.html' %}
+
+{% block title %}Lista de Préstamos{% endblock %}
+
+{% block content %}
+    <div class="container">
+        <h2 class="mb-4">Lista de Préstamos</h2>
+        <form method="get">
+            <label>
+                <input type="text" name="q" placeholder="Buscar por cliente o monto..." value="{{ request.GET.q }}">
+            </label>
+            <button type="submit">Buscar</button>
+        </form>
+
+        <a href="{% url 'prestamos:registrar_prestamo' %}" class="btn btn-success">Agregar Nuevo Préstamo</a>
+        <a href="{% url 'prestamos:home' %}" class="btn btn-secondary">Regresar al Menú Principal</a>
+
+        {% if prestamos %}
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Cliente</th>
+                        <th>Monto</th>
+                        <th>Tipo de Pago</th>
+                        <th>Fecha Inicio</th>
+                        <th>Tasa de Interés</th>
+                        <th>Saldo Actual</th>
+                        <th>Estado</th>
+                        <th>Acciones</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {% for prestamo in prestamos %}
+                        <tr>
+                            <td>{{ prestamo.id }}</td>
+                            <td>{{ prestamo.nombre_cliente }}</td>
+                            <td>{{ prestamo.monto_original }} MXN</td>
+                            <td>{{ prestamo.tipo_pago }}</td>
+                            <td>{{ prestamo.fecha_inicio }}</td>
+                            <td>{{ prestamo.tasa_interes_anual }}%</td>
+                            <td>{{ prestamo.saldo_actual }} MXN</td>
+                            <td>{{ prestamo.activo|yesno:"Activo,Inactivo" }}</td>
+                            <td>
+                                <a href="{% url 'prestamos:detalle_prestamo' pk=prestamo.pk %}" class="btn btn-info btn-sm">Ver Detalle</a>
+                                <a href="{% url 'prestamos:editar_prestamo' prestamo_id=prestamo.pk %}" class="btn btn-warning btn-sm">Editar</a>
+                                <a href="{% url 'prestamos:borrar_prestamo' prestamo_id=prestamo.pk %}" class="btn btn-danger btn-sm" onclick="return confirm('¿Estás seguro de borrar este préstamo?');">Borrar</a>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p>No hay préstamos registrados.</p>
+        {% endif %}
+    </div>
+    <table>
+    <thead>
+        <tr>
+            <th>Cliente</th>
+            <th>Monto</th>
+            <th>Fecha Inicio</th>
+            <th>Acciones</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for prestamo in object_list %}  <!-- O 'prestamos' si usas función view -->
+        <tr>
+            <td>{{ prestamo.cliente }}</td>  <!-- Ajusta a tus campos -->
+            <td>{{ prestamo.monto }}</td>
+            <td>{{ prestamo.fecha_inicio }}</td>
+            <td>
+                <!-- Enlace para ver/editar, si existe -->
+                <a href="{% url 'detalle_prestamo' prestamo.pk %}">Ver</a>
+                <!-- Formulario para borrar -->
+                <form action="{% url 'delete_prestamo' prestamo.pk %}" method="post" style="display: inline;">
+                    {% csrf_token %}
+                    <button type="submit" onclick="return confirm('¿Estás seguro de borrar este préstamo? Se eliminarán todos los movimientos asociados.');">Borrar</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

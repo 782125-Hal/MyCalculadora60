@@ -1,0 +1,48 @@
+<!-- templates/prestamos/calculadora_financiera.html - Agrega botón "Regresar a Inicio" al final. Muestra resultado (incluso advertencia) y opción de registro siempre que se calcule (punto 3). -->
+
+{% extends 'base.html' %}
+
+{% block content %}
+
+
+<h2>Calculadora</h2>
+
+<form method="post">
+    {% csrf_token %}
+    {{ form.monto.label }}: {{ form.monto }}<br>
+    {{ form.tasa.label }}: {{ form.tasa }}<br>
+    {{ form.tipo_calculo.label }}: {{ form.tipo_calculo }}<br>
+    <div id="campo_plazo" style="display: none;">
+        {{ form.plazo_meses.label }}: {{ form.plazo_meses }}<br>
+    </div>
+    <div id="campo_pago" style="display: none;">
+        {{ form.pago_mensual.label }}: {{ form.pago_mensual }}<br>
+    </div>
+    <button type="submit">Calcular</button>
+</form>
+
+<script>
+    document.querySelector('[name="tipo_calculo"]').addEventListener('change', function(e) {
+        var tipo = e.target.value;
+        document.getElementById('campo_plazo').style.display = (tipo === 'pago') ? 'block' : 'none';
+        document.getElementById('campo_pago').style.display = (tipo === 'plazo') ? 'block' : 'none';
+    });
+    document.querySelector('[name="tipo_calculo"]').dispatchEvent(new Event('change'));
+</script>
+
+{% if result %}
+    <h3>Resultado:</h3>
+    <p>{{ result }}</p>
+
+    <h3>Registrar Préstamo</h3>
+    <form method="post">
+        {% csrf_token %}
+        {{ reg_form.as_p }}
+        <button type="submit" name="register">Registrar</button>
+    </form>
+{% endif %}
+
+<a href="{% url 'prestamos:home' %}" class="btn btn-secondary">Regresar a Inicio</a>  <!-- Botón agregado para regresar a inicio -->
+
+<p>© 2025 Tu App de Préstamos</p>
+{% endblock %}

@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+
+{% block title %}Inicio - Tu App de Préstamos{% endblock %}
+
+{% block content %}
+<h1 class="mb-4 text-center">Bienvenido</h1>
+<p class="lead text-center">Selecciona una de las opciones disponibles:</p>
+
+<div class="d-grid gap-3 col-6 mx-auto mt-4">
+
+    <a href="{% url 'prestamos:calculadora_financiera' %}" class="btn btn-primary btn-lg">🧮 Calculadora Financiera</a>
+    <a href="{% url 'prestamos:registrar_prestamo' %}" class="btn btn-success btn-lg">➕ Registrar Nuevo Préstamo</a>
+    <a href="{% url 'prestamos:lista_prestamos' %}" class="btn btn-secondary btn-lg">📋 Ver Lista de Préstamos</a>
+    <a href="{% url 'prestamos:inversiones' %}" class="btn btn-info btn-lg">📈 Ver Inversiones</a>
+</div>
+{% endblock %}

@@ -1,0 +1,133 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2 class="mb-4 text-center">Detalle del Préstamo</h2>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-start mb-2">
+                <h5 class="card-title mb-0">Información del Préstamo</h5>
+                <a href="{% url 'prestamos:editar_prestamo' prestamo.id %}" class="btn btn-sm btn-outline-primary">Editar Préstamo</a>
+            </div>
+            <p><strong>Cliente:</strong> {{ prestamo.nombre_cliente }}</p>
+            <p><strong>Préstamo Inicial:</strong> ${{ prestamo.monto_original|floatformat:2 }}</p>
+            <p><strong>Saldo actual:</strong> ${{ prestamo.saldo_actual|floatformat:2 }}</p>
+            <p><strong>Fecha de inicio:</strong> {{ prestamo.fecha_inicio|date:"M. d, Y" }}</p>
+            <p><strong>Tasa anual:</strong> {{ prestamo.tasa_interes_anual }}%</p>
+            <p><strong>Pago mensual:</strong> ${{ prestamo.pago_mensual|floatformat:2 }}</p>
+            <p><strong>Plazo:</strong> {{ prestamo.plazo_meses }} meses</p>
+        </div>
+    </div>
+
+    <div class="mb-4">
+        <h5>Movimientos Registrados</h5>
+        <table class="table table-striped">
+            <thead>
+                <tr>
+                    <th>Fecha</th>
+                    <th>Monto</th>
+                    <th>Tipo</th>
+                    <th>Descripción</th>
+                    <th>Acciones</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for movimiento in movimientos %}
+                <tr>
+                    <td>{{ movimiento.fecha }}</td>
+                    <td>${{ movimiento.monto|floatformat:2 }}</td>
+                    <td>{{ movimiento.get_tipo_display }}</td>
+                    <td>{{ movimiento.descripcion }}</td>
+                    <td>
+                        <a href="{% url 'prestamos:editar_movimiento' movimiento.id %}" class="btn btn-sm btn-primary">Editar</a>
+                        <form action="{% url 'prestamos:borrar_movimiento' movimiento.id %}" method="post" style="display:inline;">
+                            {% csrf_token %}
+                            <button type="submit" class="btn btn-sm btn-danger">Eliminar</button>
+                        </form>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="5" class="text-center">No hay movimientos registrados.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="row">
+        <div class="col-md-6">
+            <h5>Registrar Pago</h5>
+            <form action="{% url 'prestamos:registrar_pago' prestamo.id %}" method="post">
+                {% csrf_token %}
+                <div class="mb-2">
+                    <label for="monto">Monto</label>
+                    <input type="number" step="0.01" name="monto" class="form-control" required>
+                </div>
+                <div class="mb-2">
+                    <label for="fecha">Fecha</label>
+                    <input type="date" name="fecha" class="form-control" value="{{ fecha_actual|date:'Y-m-d' }}">
+                </div>
+                <div class="mb-2">
+                    <label for="descripcion">Descripción</label>
+                    <input type="text" name="descripcion" class="form-control" placeholder="Pago">
+                </div>
+                <button type="submit" class="btn btn-success">Registrar Pago</button>
+            </form>
+        </div>
+
+        <div class="col-md-6">
+            <h5>Registrar Incremento</h5>
+            <form action="{% url 'prestamos:registrar_incremento' prestamo.id %}" method="post">
+                {% csrf_token %}
+                <div class="mb-2">
+                    <label for="monto_incremento">Monto</label>
+                    <input type="number" step="0.01" name="monto_incremento" class="form-control" required>
+                </div>
+                <div class="mb-2">
+                    <label for="fecha">Fecha</label>
+                    <input type="date" name="fecha" class="form-control" value="{{ fecha_actual|date:'Y-m-d' }}">
+                </div>
+                <div class="mb-2">
+                    <label for="descripcion">Descripción</label>
+                    <input type="text" name="descripcion" class="form-control" placeholder="Incremento de capital">
+                </div>
+                <button type="submit" class="btn btn-warning">Registrar Incremento</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="mt-5">
+        <h5>Amortización</h5>
+        <table class="table table-bordered">
+            <thead>
+                <tr>
+                    <th>Periodo</th>
+                    <th>Fecha</th>
+                    <th>Interés</th>
+                    <th>Capital</th>
+                    <th>Pago</th>
+                    <th>Saldo</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for fila in amortizacion %}
+                <tr>
+                    <td>{{ fila.periodo }}</td>
+                    <td>{{ fila.fecha }}</td>
+                    <td>${{ fila.interes|floatformat:2 }}</td>
+                    <td>${{ fila.capital|floatformat:2 }}</td>
+                    <td>${{ fila.pago|floatformat:2 }}</td>
+                    <td>${{ fila.saldo|floatformat:2 }}</td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="6" class="text-center">No hay tabla de amortización disponible.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

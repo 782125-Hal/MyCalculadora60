@@ -1,0 +1,115 @@
+<!-- prestamos/templates/prestamos/inversiones.html -->
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calculadora de Inversiones</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const form = document.getElementById('calculadoraForm');
+            const resultadosDiv = document.getElementById('resultados');
+
+            form.addEventListener('input', () => {
+                const anos = parseInt(document.getElementById('anos').value) || 0;
+                const inversionInicial = parseFloat(document.getElementById('inversionInicial').value) || 0;
+                const tasaDescuento = parseFloat(document.getElementById('tasaDescuento').value) || 0;
+
+                let ingresosInputs = [];
+                let costosInputs = [];
+                for (let i = 0; i < anos; i++) {
+                    ingresosInputs.push(parseFloat(document.getElementById(`ingreso${i}`).value) || 0);
+                    costosInputs.push(parseFloat(document.getElementById(`costo${i}`).value) || 0);
+                }
+
+                const van = calcularVAN(inversionInicial, ingresosInputs, costosInputs, tasaDescuento, anos);
+                const trc = calcularTRC(inversionInicial, ingresosInputs, costosInputs);
+                const rcb = relacionCostoBeneficio(inversionInicial, ingresosInputs, costosInputs, anos);
+
+                resultadosDiv.innerHTML = `
+                    <p class="mt-2">Valor Actual Neto (VAN): $${van.toLocaleString()}</p>
+                    <p class="mt-2">Tiempo de Recuperación del Capital (TRC): ${trc >= 0 ? trc.toFixed(2) + ' años' : 'No se recupera el capital'}</p>
+                    <p class="mt-2">Relación Costo-Beneficio (RCB): ${rcb}</p>
+                `;
+            });
+
+            function calcularVAN(inversionInicial, ingresos, costos, tasaDescuento, anos) {
+                let flujos = [-inversionInicial];
+                for (let i = 0; i < anos; i++) {
+                    flujos.push(ingresos[i] - costos[i]);
+                }
+                let van = 0;
+                for (let i = 0; i < flujos.length; i++) {
+                    van += flujos[i] / Math.pow(1 + tasaDescuento / 100, i);
+                }
+                return Math.round(van * 100) / 100;
+            }
+
+            function calcularTRC(inversionInicial, ingresos, costos) {
+                let acumulado = 0;
+                for (let i = 0; i < ingresos.length; i++) {
+                    acumulado += ingresos[i] - costos[i];
+                    if (acumulado >= 0) {
+                        return i + (inversionInicial - (acumulado - (ingresos[i] - costos[i]))) / (ingresos[i] - costos[i]);
+                    }
+                }
+                return -1;
+            }
+
+            function relacionCostoBeneficio(inversionInicial, ingresos, costos, anos) {
+                let beneficiosTotales = ingresos.reduce((a, b) => a + b, 0) - costos.reduce((a, b) => a + b, 0);
+                let costosTotales = inversion_inicial + costos.reduce((a, b) => a + b, 0);
+                return costosTotales > 0 ? Math.round((beneficiosTotales / costosTotales) * 100) / 100 : 0;
+            }
+
+            document.getElementById('anos').addEventListener('change', () => {
+                const anos = parseInt(document.getElementById('anos').value) || 0;
+                const ingresosDiv = document.getElementById('ingresos');
+                const costosDiv = document.getElementById('costos');
+                ingresosDiv.innerHTML = '';
+                costosDiv.innerHTML = '';
+                for (let i = 0; i < anos; i++) {
+                    ingresosDiv.innerHTML += `<div class="mb-4"><label class="block text-sm font-medium">Ingreso Año ${i + 1}</label><input type="number" name="ingreso${i}" id="ingreso${i}" step="0.01" class="w-full border p-2 rounded" placeholder="0.00" required></div>`;
+                    costosDiv.innerHTML += `<div class="mb-4"><label class="block text-sm font-medium">Costo Año ${i + 1}</label><input type="number" name="costo${i}" id="costo${i}" step="0.01" class="w-full border p-2 rounded" placeholder="0.00" required></div>`;
+                }
+                form.dispatchEvent(new Event('input'));
+            });
+
+            // Enviar formulario al registrar
+            document.getElementById('registrarButton').addEventListener('click', () => {
+                form.action = "{% url 'prestamos:registrar_inversion' %}"; // URL correcta para registrar
+                form.method = "POST";
+                form.submit();
+            });
+
+            form.dispatchEvent(new Event('input'));
+        });
+    </script>
+</head>
+<body class="bg-gray-100 p-6">
+    <div class="max-w-2xl mx-auto bg-white p-6 rounded shadow">
+        <h1 class="text-2xl font-bold mb-4">Calculadora de Inversiones</h1>
+        <form id="calculadoraForm" method="POST">
+            {% csrf_token %}
+            <div class="mb-4">
+                <label class="block text-sm font-medium">Inversión Inicial</label>
+                <input type="number" name="inversionInicial" id="inversionInicial" step="0.01" class="w-full border p-2 rounded" placeholder="0.00" required>
+            </div>
+            <div class="mb-4">
+                <label class="block text-sm font-medium">Número de Años</label>
+                <input type="number" id="anos" min="1" class="w-full border p-2 rounded" required>
+            </div>
+            <div class="mb-4">
+                <label class="block text-sm font-medium">Tasa de Descuento (%)</label>
+                <input type="number" name="tasaDescuento" id="tasaDescuento" step="0.01" class="w-full border p-2 rounded" placeholder="0.00" required>
+            </div>
+            <div id="ingresos" class="mb-4"></div>
+            <div id="costos" class="mb-4"></div>
+            <button type="button" id="registrarButton" class="bg-green-500 text-white p-2 rounded mt-4">Registrar Inversión</button>
+        </form>
+        <div id="resultados" class="mt-4 p-4 bg-green-100 rounded"></div>
+        <a href="{% url 'prestamos:home' %}" class="mt-4 inline-block bg-gray-500 text-white p-2 rounded">Regresar</a>
+    </div>
+</body>
+</html>

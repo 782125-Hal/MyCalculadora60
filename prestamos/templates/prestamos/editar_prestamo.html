@@ -1,0 +1,51 @@
+{% extends 'base.html' %}
+
+{% block title %}Editar Préstamo{% endblock %}
+
+{% block content %}
+<div class="container mt-5" style="max-width: 600px;">
+    <h2 class="mb-4">Editar Préstamo</h2>
+
+    <div class="card">
+        <div class="card-body">
+            <form method="post">
+                {% csrf_token %}
+
+                <div class="mb-3">
+                    <label for="monto_original" class="form-label fw-bold">Monto Original</label>
+                    <div class="input-group">
+                        <span class="input-group-text">$</span>
+                        <input type="number" step="0.01" min="0.01" name="monto_original"
+                               id="monto_original" class="form-control"
+                               value="{{ prestamo.monto_original }}" required>
+                    </div>
+                </div>
+
+                <div class="mb-3">
+                    <label for="tasa_interes_anual" class="form-label fw-bold">Tasa de Interés Anual (%)</label>
+                    <div class="input-group">
+                        <input type="number" step="0.01" min="0" name="tasa_interes_anual"
+                               id="tasa_interes_anual" class="form-control"
+                               value="{{ prestamo.tasa_interes_anual }}" required>
+                        <span class="input-group-text">%</span>
+                    </div>
+                </div>
+
+                <div class="mb-3">
+                    <label for="tipo_pago" class="form-label fw-bold">Tipo de Pago</label>
+                    <select name="tipo_pago" id="tipo_pago" class="form-select">
+                        <option value="mensual" {% if prestamo.tipo_pago == 'mensual' %}selected{% endif %}>Mensual</option>
+                        <option value="semanal" {% if prestamo.tipo_pago == 'semanal' %}selected{% endif %}>Semanal</option>
+                    </select>
+                </div>
+
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-primary">Guardar Cambios</button>
+                    <a href="{% url 'prestamos:detalle_prestamo' prestamo.id %}"
+                       class="btn btn-secondary">Cancelar</a>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

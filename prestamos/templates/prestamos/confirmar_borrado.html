@@ -1,0 +1,16 @@
+<!-- templates/prestamos/confirmar_borrado.html - Template para confirmación de borrado de préstamo. -->
+
+{% extends 'base.html' %}
+
+{% block content %}
+<h1>Confirmar Borrado</h1>
+
+<p>¿Estás seguro de borrar el préstamo de {{ prestamo.nombre_cliente }}?</p>
+
+<form method="post">
+    {% csrf_token %}
+    <button type="submit">Sí, Borrar</button>
+</form>
+
+<a href="{% url 'prestamos:lista_prestamos' %}">Cancelar</a>
+{% endblock %}
