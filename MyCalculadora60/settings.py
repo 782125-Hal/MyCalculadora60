@@ -89,7 +89,11 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Seguridad en producción (se activan solo cuando DEBUG=False)
 if not DEBUG:
-    SECURE_SSL_REDIRECT = True
+    # Railway (y la mayoría de plataformas cloud) terminan HTTPS externamente
+    # y pasan HTTP internamente. SECURE_SSL_REDIRECT causaría un loop infinito.
+    # En su lugar, le decimos a Django que confíe en el header X-Forwarded-Proto
+    # que Railway envía para indicar que la conexión original fue HTTPS.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
