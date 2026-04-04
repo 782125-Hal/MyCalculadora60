@@ -1,6 +1,9 @@
 asgiref==3.9.1
+click==8.3.2
 Django==5.2.4
 djangorestframework==3.17.1
+h11==0.16.0
 python-dateutil==2.9.0.post0
 six==1.17.0
 sqlparse==0.5.3
+uvicorn==0.43.0
