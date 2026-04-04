@@ -16,6 +16,7 @@ db.sqlite3
 *.log
 media/
 staticfiles/
+nohup.out
 
 # IDE
 .idea/
@@ -26,6 +27,7 @@ staticfiles/
 .DS_Store
 Thumbs.db
 
-# Variables de entorno
+# Variables de entorno (el .env.example SÍ se sube como referencia)
 .env
-.env.*
+.env.local
+.env.production
