@@ -503,6 +503,46 @@ class ApiPrestamoAislamientoTest(TestCase):
         self.assertIn(resp.status_code, (401, 403))
 
 
+class AdminVeTodoTest(TestCase):
+    """Un superusuario ve los préstamos de todos (web y API); el aislamiento
+    sigue aplicando a usuarios normales."""
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+        self.dueno = User.objects.create_user('dueno', password='x')
+        self.admin = User.objects.create_superuser('jefe', 'jefe@x.com', 'x')
+        self.prestamo = Prestamo.objects.create(
+            owner=self.dueno, nombre_cliente="Cliente de Dueño",
+            monto_original=Decimal('7777'), tasa_interes_anual=Decimal('5'),
+            tipo_pago='mensual', modo='fixed_payment', saldo_actual=Decimal('7777'),
+            fecha_inicio=date.today(),
+        )
+
+    def test_admin_ve_prestamo_ajeno_en_web(self):
+        self.client.login(username='jefe', password='x')
+        # Detalle de un préstamo que no es suyo → 200 (no 404)
+        self.assertEqual(
+            self.client.get(f'/prestamos/prestamo/{self.prestamo.id}/').status_code, 200
+        )
+        # Aparece en el listado
+        lista = self.client.get('/prestamos/lista-prestamos/')
+        self.assertContains(lista, "Cliente de Dueño")
+
+    def test_admin_ve_prestamo_ajeno_en_api(self):
+        self.client.login(username='jefe', password='x')
+        resp = self.client.get('/api/prestamos/')
+        self.assertEqual(resp.json()['count'], 1)
+
+    def test_usuario_normal_sigue_aislado(self):
+        # Un tercer usuario normal NO ve el préstamo de 'dueno'
+        from django.contrib.auth.models import User
+        User.objects.create_user('otro', password='x')
+        self.client.login(username='otro', password='x')
+        self.assertEqual(
+            self.client.get(f'/prestamos/prestamo/{self.prestamo.id}/').status_code, 404
+        )
+
+
 class AuditoriaTest(TestCase):
     """Las acciones financieras dejan rastro en RegistroAuditoria."""
 

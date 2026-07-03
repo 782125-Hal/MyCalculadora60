@@ -7,7 +7,10 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
-from .models import Cliente, Prestamo, Movimiento
+from .models import (
+    Cliente, Prestamo, Movimiento,
+    prestamos_visibles, movimientos_visibles, clientes_visibles,
+)
 from .calculator import calculate_payment_for_term, calculate_term_for_payment
 from .serializers import (
     ClienteSerializer,
@@ -33,8 +36,8 @@ class ClienteViewSet(viewsets.ModelViewSet):
     serializer_class = ClienteSerializer
 
     def get_queryset(self):
-        # Aislamiento por usuario de la PII de clientes.
-        return Cliente.objects.filter(owner=self.request.user).order_by('nombre')
+        # PII de clientes: los propios, o todos si es administrador.
+        return clientes_visibles(self.request.user).order_by('nombre')
 
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
@@ -42,7 +45,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def prestamos(self, request, pk=None):
         cliente = self.get_object()
-        prestamos = cliente.prestamo_set.filter(owner=request.user)
+        prestamos = prestamos_visibles(request.user).filter(cliente=cliente)
         serializer = PrestamoListSerializer(prestamos, many=True)
         return Response(serializer.data)
 
@@ -65,8 +68,8 @@ class PrestamoViewSet(viewsets.ModelViewSet):
     queryset = Prestamo.objects.all().order_by('-fecha_inicio')
 
     def get_queryset(self):
-        # Aislamiento por usuario: cada quien solo ve/edita sus préstamos.
-        return Prestamo.objects.filter(owner=self.request.user).order_by('-fecha_inicio')
+        # Préstamos visibles: los propios, o todos si es administrador.
+        return prestamos_visibles(self.request.user).order_by('-fecha_inicio')
 
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
@@ -197,17 +200,20 @@ class MovimientoViewSet(viewsets.ModelViewSet):
     serializer_class = MovimientoSerializer
 
     def get_queryset(self):
-        # Solo movimientos de préstamos propiedad del usuario autenticado.
-        qs = Movimiento.objects.filter(prestamo__owner=self.request.user).order_by('fecha')
+        # Movimientos de préstamos visibles (propios, o todos si es admin).
+        qs = movimientos_visibles(self.request.user).order_by('fecha')
         prestamo_id = self.request.query_params.get('prestamo')
         if prestamo_id:
             qs = qs.filter(prestamo_id=prestamo_id)
         return qs
 
     def perform_create(self, serializer):
-        # Impide crear movimientos sobre préstamos ajenos.
+        # Impide crear movimientos sobre préstamos que el usuario no puede ver.
         prestamo = serializer.validated_data.get('prestamo')
-        if prestamo is None or prestamo.owner_id != self.request.user.id:
+        permitido = prestamo is not None and (
+            self.request.user.is_superuser or prestamo.owner_id == self.request.user.id
+        )
+        if not permitido:
             raise PermissionDenied('No puede registrar movimientos en este préstamo.')
         serializer.save()
 

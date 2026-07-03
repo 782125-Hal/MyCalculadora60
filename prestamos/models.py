@@ -229,6 +229,24 @@ class RegistroAuditoria(models.Model):
         return f"[{self.fecha:%Y-%m-%d %H:%M}] {self.usuario_nombre} {self.accion} {self.modelo}#{self.objeto_id}"
 
 
+def prestamos_visibles(user):
+    """Préstamos que el usuario puede ver: los suyos, o todos si es administrador."""
+    qs = Prestamo.objects.all()
+    return qs if getattr(user, 'is_superuser', False) else qs.filter(owner=user)
+
+
+def movimientos_visibles(user):
+    """Movimientos visibles: de sus préstamos, o de todos si es administrador."""
+    qs = Movimiento.objects.all()
+    return qs if getattr(user, 'is_superuser', False) else qs.filter(prestamo__owner=user)
+
+
+def clientes_visibles(user):
+    """Clientes visibles: los suyos, o todos si es administrador."""
+    qs = Cliente.objects.all()
+    return qs if getattr(user, 'is_superuser', False) else qs.filter(owner=user)
+
+
 def registrar_auditoria(user, accion, modelo, objeto_id=None, detalle=''):
     """Crea una entrada de auditoría de forma segura (nunca rompe la vista)."""
     try:

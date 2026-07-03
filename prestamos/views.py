@@ -9,7 +9,10 @@ from django.utils import timezone
 from django.views import View
 from django.views.generic import DetailView
 
-from .models import Cliente, Prestamo, Movimiento, registrar_auditoria
+from .models import (
+    Cliente, Prestamo, Movimiento, registrar_auditoria,
+    prestamos_visibles, movimientos_visibles, clientes_visibles,
+)
 from .forms import (
     CalculatorForm,
     RegistrationForm,
@@ -53,8 +56,8 @@ def home(request):
 
     hoy = timezone.now().date()
 
-    # KPIs básicos — solo los préstamos del usuario autenticado
-    prestamos = Prestamo.objects.filter(owner=request.user)
+    # KPIs básicos — préstamos visibles (los propios; todos si es admin)
+    prestamos = prestamos_visibles(request.user)
     total_original = prestamos.aggregate(total=Sum('monto_original'))['total'] or Decimal('0')
     total_saldo = prestamos.aggregate(total=Sum('saldo_actual'))['total'] or Decimal('0')
     activos = prestamos.filter(activo=True).count()
@@ -65,8 +68,7 @@ def home(request):
     top_saldos = prestamos.filter(activo=True).order_by('-saldo_actual')[:5]
 
     # Movimientos recientes (últimos 7 días)
-    recientes = Movimiento.objects.filter(
-        prestamo__owner=request.user,
+    recientes = movimientos_visibles(request.user).filter(
         fecha__gte=hoy - timedelta(days=7)
     ).select_related('prestamo').order_by('-fecha')[:8]
 
@@ -89,7 +91,7 @@ def home(request):
 def lista_prestamos(request):
     """Vista para listar todos los préstamos con actualización diaria del saldo (Punto 5)."""
     q = request.GET.get('q', '').strip()
-    prestamos = Prestamo.objects.filter(owner=request.user)
+    prestamos = prestamos_visibles(request.user)
     if q:
         qs_filter = (
             Q(nombre_cliente__icontains=q) |
@@ -257,8 +259,8 @@ class PrestamoDetailView(LoginRequiredMixin, DetailView):
     template_name = 'prestamos/detalle_prestamo.html'
 
     def get_queryset(self):
-        # Solo permite ver préstamos propios; ajenos → 404 en vez de exponerse.
-        return Prestamo.objects.filter(owner=self.request.user)
+        # Solo préstamos visibles; ajenos → 404 en vez de exponerse.
+        return prestamos_visibles(self.request.user)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -278,7 +280,7 @@ class PrestamoDetailView(LoginRequiredMixin, DetailView):
 @login_required
 def registrar_pago(request, prestamo_id):
     """Vista para registrar un pago en un préstamo usando PagoForm."""
-    prestamo = get_object_or_404(Prestamo, id=prestamo_id, owner=request.user)
+    prestamo = get_object_or_404(prestamos_visibles(request.user), id=prestamo_id)
 
     if request.method == 'POST':
         form = PagoForm(request.POST)
@@ -310,7 +312,7 @@ def registrar_pago(request, prestamo_id):
 @login_required
 def registrar_incremento(request, prestamo_id):
     """Vista para registrar un incremento de capital usando IncrementoForm."""
-    prestamo = get_object_or_404(Prestamo, id=prestamo_id, owner=request.user)
+    prestamo = get_object_or_404(prestamos_visibles(request.user), id=prestamo_id)
 
     if request.method == 'POST':
         form = IncrementoForm(request.POST)
@@ -338,7 +340,7 @@ def registrar_incremento(request, prestamo_id):
 @login_required
 def editar_movimiento(request, movimiento_id):
     """Vista para editar un movimiento existente usando MovimientoForm."""
-    movimiento = get_object_or_404(Movimiento, id=movimiento_id, prestamo__owner=request.user)
+    movimiento = get_object_or_404(movimientos_visibles(request.user), id=movimiento_id)
     prestamo_id = movimiento.prestamo.id
 
     if request.method == 'POST':
@@ -378,7 +380,7 @@ def editar_movimiento(request, movimiento_id):
 @login_required
 def borrar_movimiento(request, movimiento_id):
     """Vista para borrar un movimiento (Punto 4)."""
-    movimiento = get_object_or_404(Movimiento, id=movimiento_id, prestamo__owner=request.user)
+    movimiento = get_object_or_404(movimientos_visibles(request.user), id=movimiento_id)
     prestamo_id = movimiento.prestamo.id
     if request.method == 'POST':
         try:
@@ -397,7 +399,7 @@ def borrar_movimiento(request, movimiento_id):
 @login_required
 def editar_prestamo(request, prestamo_id):
     """Vista para editar los datos de un préstamo usando PrestamoEditForm."""
-    prestamo = get_object_or_404(Prestamo, id=prestamo_id, owner=request.user)
+    prestamo = get_object_or_404(prestamos_visibles(request.user), id=prestamo_id)
 
     if request.method == 'POST':
         form = PrestamoEditForm(request.POST)
@@ -428,7 +430,7 @@ def editar_prestamo(request, prestamo_id):
 @login_required
 def delete_prestamo(request, prestamo_id):
     """Vista para eliminar un préstamo (Punto 4)."""
-    prestamo = get_object_or_404(Prestamo, id=prestamo_id, owner=request.user)
+    prestamo = get_object_or_404(prestamos_visibles(request.user), id=prestamo_id)
     if request.method == 'POST':
         try:
             with transaction.atomic():
@@ -451,8 +453,8 @@ def crear_prestamo(request):
     """Vista para crear un préstamo desde un formulario simple."""
     if request.method == 'POST':
         form = CrearPrestamoSimpleForm(request.POST)
-        # Solo se pueden elegir clientes propios.
-        form.fields['cliente'].queryset = Cliente.objects.filter(owner=request.user)
+        # Clientes seleccionables: los propios (todos si es admin).
+        form.fields['cliente'].queryset = clientes_visibles(request.user)
         if form.is_valid():
             try:
                 cliente = form.cleaned_data['cliente']
@@ -480,7 +482,7 @@ def crear_prestamo(request):
             for field, errors in form.errors.items():
                 for error in errors:
                     messages.error(request, f"{field}: {error}")
-    clientes = Cliente.objects.filter(owner=request.user)
+    clientes = clientes_visibles(request.user)
     return render(request, 'prestamos/crear_prestamo.html', {'clientes': clientes})
 
 @login_required
@@ -590,7 +592,7 @@ def export_prestamos_csv(request):
         'Tipo Pago', 'Modo', 'Fecha Inicio', 'Activo', 'Ultimo Pago'
     ])
 
-    for p in Prestamo.objects.filter(owner=request.user).order_by('-fecha_inicio'):
+    for p in prestamos_visibles(request.user).order_by('-fecha_inicio'):
         writer.writerow([
             p.id,
             _csv_safe(p.nombre_cliente),
@@ -609,7 +611,7 @@ def export_prestamos_csv(request):
 @login_required
 def export_prestamo_csv(request, pk):
     """Exporta movimientos + tabla de amortización de un préstamo específico."""
-    prestamo = get_object_or_404(Prestamo, pk=pk, owner=request.user)
+    prestamo = get_object_or_404(prestamos_visibles(request.user), pk=pk)
     response = HttpResponse(content_type='text/csv; charset=utf-8')
     response['Content-Disposition'] = f'attachment; filename="prestamo_{pk}.csv"'
 
@@ -659,7 +661,7 @@ def export_prestamo_pdf(request, pk):
     from reportlab.lib.units import inch
     from io import BytesIO
 
-    prestamo = get_object_or_404(Prestamo, pk=pk, owner=request.user)
+    prestamo = get_object_or_404(prestamos_visibles(request.user), pk=pk)
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter,
