@@ -63,7 +63,10 @@
                     <tr>
                         <td>{{ p.nombre_cliente }}</td>
                         <td>${{ p.saldo_actual|floatformat:2 }}</td>
-                        <td><a href="{% url 'prestamos:detalle_prestamo' pk=p.pk %}" class="btn btn-sm btn-outline-primary">Ver</a></td>
+                        <td>
+                            <a href="{% url 'prestamos:detalle_prestamo' pk=p.pk %}" class="btn btn-sm btn-outline-primary">Ver</a>
+                            <a href="{% url 'prestamos:borrar_prestamo' prestamo_id=p.pk %}" class="btn btn-sm btn-outline-danger">Eliminar</a>
+                        </td>
                     </tr>
                     {% empty %}
                     <tr><td colspan="3">No hay préstamos activos.</td></tr>
