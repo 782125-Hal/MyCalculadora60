@@ -18,10 +18,18 @@ Including another URLconf
 # MyCalculadora60/urls.py
 from django.contrib import admin
 from django.urls import path, include
+from django.contrib.auth import views as auth_views
 from prestamos import views  # Importa las vistas de la aplicación prestamos
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+
+    # Autenticación (login / logout)
+    path('accounts/login/', auth_views.LoginView.as_view(
+        template_name='registration/login.html'
+    ), name='login'),
+    path('accounts/logout/', auth_views.LogoutView.as_view(next_page='/'), name='logout'),
+
     path('prestamos/', include('prestamos.urls', namespace='prestamos')),
     path('api/', include('prestamos.api_urls')),
     path('', views.home, name='home'),  # Ruta raíz usando la vista home de prestamos

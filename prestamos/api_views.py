@@ -1,13 +1,14 @@
-import math
 from decimal import Decimal
 
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
 from .models import Cliente, Prestamo, Movimiento
+from .calculator import calculate_payment_for_term, calculate_term_for_payment
 from .serializers import (
     ClienteSerializer,
     PrestamoSerializer,
@@ -34,7 +35,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def prestamos(self, request, pk=None):
         cliente = self.get_object()
-        prestamos = cliente.prestamo_set.all()
+        prestamos = cliente.prestamo_set.filter(owner=request.user)
         serializer = PrestamoListSerializer(prestamos, many=True)
         return Response(serializer.data)
 
@@ -55,6 +56,13 @@ class PrestamoViewSet(viewsets.ModelViewSet):
     POST   /api/prestamos/calcular/                 → calcular pago o plazo sin guardar
     """
     queryset = Prestamo.objects.all().order_by('-fecha_inicio')
+
+    def get_queryset(self):
+        # Aislamiento por usuario: cada quien solo ve/edita sus préstamos.
+        return Prestamo.objects.filter(owner=self.request.user).order_by('-fecha_inicio')
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -127,44 +135,44 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         try:
             monto = Decimal(str(monto))
             tasa = Decimal(str(tasa))
-            r = float(tasa) / 100 / 12
         except Exception:
             return Response({'error': 'Valores numéricos inválidos.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Optional: support 'tipo_pago' ('mensual' | 'semanal') for full parity with saved loans
+        tipo_pago = request.data.get('tipo_pago', 'mensual')
 
         if tipo_calculo == 'pago':
             n = request.data.get('plazo_meses')
             if not n:
                 return Response({'error': 'Se requiere plazo_meses.'}, status=status.HTTP_400_BAD_REQUEST)
-            n = int(n)
-            if r == 0:
-                pago = float(monto) / n
-            else:
-                pago = float(monto) * r * (1 + r) ** n / ((1 + r) ** n - 1)
+            try:
+                n = int(n)
+                pago = calculate_payment_for_term(monto, tasa, n, tipo_pago=tipo_pago)
+            except Exception as e:
+                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
             return Response({
                 'tipo_calculo': 'pago',
-                'pago_mensual': round(pago, 2),
+                'pago_mensual': str(pago),
                 'plazo_meses': n,
+                'tipo_pago': tipo_pago,
             })
 
         elif tipo_calculo == 'plazo':
             pago = request.data.get('pago_mensual')
             if not pago:
                 return Response({'error': 'Se requiere pago_mensual.'}, status=status.HTTP_400_BAD_REQUEST)
-            pago = float(pago)
-            if r == 0:
-                plazo = math.ceil(float(monto) / pago)
-            else:
-                interes = float(monto) * r
-                if pago <= interes:
-                    return Response(
-                        {'error': 'El pago mensual es insuficiente para cubrir los intereses.'},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                plazo = math.ceil(math.log(pago / (pago - interes)) / math.log(1 + r))
+            try:
+                pago_dec = Decimal(str(pago))
+                plazo = calculate_term_for_payment(monto, tasa, pago_dec, tipo_pago=tipo_pago)
+            except ValueError as e:
+                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
             return Response({
                 'tipo_calculo': 'plazo',
                 'plazo_meses': plazo,
-                'pago_mensual': round(pago, 2),
+                'pago_mensual': str(pago),
+                'tipo_pago': tipo_pago,
             })
 
         return Response({'error': 'tipo_calculo debe ser "pago" o "plazo".'}, status=status.HTTP_400_BAD_REQUEST)
@@ -182,11 +190,19 @@ class MovimientoViewSet(viewsets.ModelViewSet):
     serializer_class = MovimientoSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        # Solo movimientos de préstamos propiedad del usuario autenticado.
+        qs = Movimiento.objects.filter(prestamo__owner=self.request.user).order_by('fecha')
         prestamo_id = self.request.query_params.get('prestamo')
         if prestamo_id:
             qs = qs.filter(prestamo_id=prestamo_id)
         return qs
+
+    def perform_create(self, serializer):
+        # Impide crear movimientos sobre préstamos ajenos.
+        prestamo = serializer.validated_data.get('prestamo')
+        if prestamo is None or prestamo.owner_id != self.request.user.id:
+            raise PermissionDenied('No puede registrar movimientos en este préstamo.')
+        serializer.save()
 
     def perform_destroy(self, instance):
         prestamo = instance.prestamo

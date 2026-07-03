@@ -11,6 +11,7 @@ class ClienteAdmin(admin.ModelAdmin):
 class PrestamoAdmin(admin.ModelAdmin):
     list_display = (
         'nombre_cliente',
+        'owner',
         'monto_original',
         'tasa_interes_anual',
         'fecha_inicio',
@@ -18,7 +19,7 @@ class PrestamoAdmin(admin.ModelAdmin):
         'ultimo_pago',
         'activo'
     )
-    list_filter = ('activo', 'tipo_pago', 'modo')
+    list_filter = ('activo', 'tipo_pago', 'modo', 'owner')
     search_fields = ('nombre_cliente', 'telefono')
     readonly_fields = ('saldo_actual', 'ultimo_pago')  # Hace estos campos solo lectura en admin para evitar ediciones manuales
     actions = ['actualizar_saldos_seleccionados']  # Acción custom para actualizar saldos en bulk

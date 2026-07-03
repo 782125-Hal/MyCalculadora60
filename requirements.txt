@@ -2,6 +2,7 @@ asgiref==3.9.1
 click==8.3.2
 dj-database-url==3.1.2
 Django==5.2.4
+django-axes==8.3.1
 djangorestframework==3.17.1
 h11==0.16.0
 pillow==12.2.0
@@ -12,3 +13,4 @@ six==1.17.0
 sqlparse==0.5.3
 uvicorn==0.43.0
 whitenoise==6.12.0
+reportlab==4.0.4  # Para generación de PDFs (Fase 3)

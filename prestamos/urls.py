@@ -14,6 +14,9 @@ from .views import (
     crear_prestamo,
     inversiones,
     registrar_inversion,
+    export_prestamos_csv,
+    export_prestamo_csv,
+    export_prestamo_pdf,
 )
 
 app_name = 'prestamos'
@@ -33,4 +36,9 @@ urlpatterns = [
     path('crear-prestamo/', crear_prestamo, name='crear_prestamo'),
     path('inversiones/', inversiones, name='inversiones'),
     path('registrar-inversion/', registrar_inversion, name='registrar_inversion'),
+
+    # Exportaciones CSV (Fase 3)
+    path('export/prestamos/', export_prestamos_csv, name='export_prestamos_csv'),
+    path('prestamo/<int:pk>/export/', export_prestamo_csv, name='export_prestamo_csv'),
+    path('prestamo/<int:pk>/pdf/', export_prestamo_pdf, name='export_prestamo_pdf'),
 ]

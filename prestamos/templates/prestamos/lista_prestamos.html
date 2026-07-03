@@ -7,14 +7,16 @@
 {% block content %}
     <div class="container">
         <h2 class="mb-4">Lista de Préstamos</h2>
-        <form method="get">
-            <label>
-                <input type="text" name="q" placeholder="Buscar por cliente o monto..." value="{{ request.GET.q }}">
-            </label>
-            <button type="submit">Buscar</button>
+        <form method="get" class="mb-3 d-flex align-items-center gap-2 flex-wrap">
+            <input type="text" name="q" class="form-control" style="max-width: 320px;" placeholder="Buscar por cliente, teléfono o monto..." value="{{ request.GET.q|default:'' }}">
+            <button type="submit" class="btn btn-outline-primary">Buscar</button>
+            {% if request.GET.q %}
+                <a href="{% url 'prestamos:lista_prestamos' %}" class="btn btn-outline-secondary">Limpiar</a>
+            {% endif %}
         </form>
 
         <a href="{% url 'prestamos:registrar_prestamo' %}" class="btn btn-success">Agregar Nuevo Préstamo</a>
+        <a href="{% url 'prestamos:export_prestamos_csv' %}" class="btn btn-outline-success">⬇ Exportar CSV</a>
         <a href="{% url 'prestamos:home' %}" class="btn btn-secondary">Regresar al Menú Principal</a>
 
         {% if prestamos %}
@@ -58,32 +60,4 @@
             <p>No hay préstamos registrados.</p>
         {% endif %}
     </div>
-    <table>
-    <thead>
-        <tr>
-            <th>Cliente</th>
-            <th>Monto</th>
-            <th>Fecha Inicio</th>
-            <th>Acciones</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for prestamo in object_list %}  <!-- O 'prestamos' si usas función view -->
-        <tr>
-            <td>{{ prestamo.cliente }}</td>  <!-- Ajusta a tus campos -->
-            <td>{{ prestamo.monto }}</td>
-            <td>{{ prestamo.fecha_inicio }}</td>
-            <td>
-                <!-- Enlace para ver/editar, si existe -->
-                <a href="{% url 'detalle_prestamo' prestamo.pk %}">Ver</a>
-                <!-- Formulario para borrar -->
-                <form action="{% url 'delete_prestamo' prestamo.pk %}" method="post" style="display: inline;">
-                    {% csrf_token %}
-                    <button type="submit" onclick="return confirm('¿Estás seguro de borrar este préstamo? Se eliminarán todos los movimientos asociados.');">Borrar</button>
-                </form>
-            </td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
 {% endblock %}

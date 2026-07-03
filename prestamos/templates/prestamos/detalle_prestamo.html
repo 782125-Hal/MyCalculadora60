@@ -8,7 +8,11 @@
         <div class="card-body">
             <div class="d-flex justify-content-between align-items-start mb-2">
                 <h5 class="card-title mb-0">Información del Préstamo</h5>
-                <a href="{% url 'prestamos:editar_prestamo' prestamo.id %}" class="btn btn-sm btn-outline-primary">Editar Préstamo</a>
+                <div>
+                    <a href="{% url 'prestamos:export_prestamo_csv' pk=prestamo.id %}" class="btn btn-sm btn-outline-success">⬇ CSV</a>
+                    <a href="{% url 'prestamos:export_prestamo_pdf' pk=prestamo.id %}" class="btn btn-sm btn-outline-danger">📄 PDF</a>
+                    <a href="{% url 'prestamos:editar_prestamo' prestamo.id %}" class="btn btn-sm btn-outline-primary">Editar Préstamo</a>
+                </div>
             </div>
             <p><strong>Cliente:</strong> {{ prestamo.nombre_cliente }}</p>
             <p><strong>Préstamo Inicial:</strong> ${{ prestamo.monto_original|floatformat:2 }}</p>

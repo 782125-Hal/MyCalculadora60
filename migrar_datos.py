@@ -163,29 +163,12 @@ def migrar_movimientos(sqlite_conn, pg_conn):
 
 
 def migrar_pagos(sqlite_conn, pg_conn):
-    """prestamos_pago — depende de prestamos_prestamo."""
-    filas = leer_tabla(sqlite_conn, "prestamos_pago")
-    if not filas:
-        print("  prestamos_pago: sin registros.")
-        return 0
-
-    migrados = 0
-    cur = pg_conn.cursor()
-    for f in filas:
-        cur.execute(
-            """
-            INSERT INTO prestamos_pago (id, prestamo_id, fecha, monto)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (id) DO NOTHING
-            """,
-            (f["id"], f["prestamo_id"], f["fecha"], f["monto"]),
-        )
-        if cur.rowcount:
-            migrados += 1
-
-    pg_conn.commit()
-    print(f"  prestamos_pago: {migrados} de {len(filas)} registros migrados.")
-    return migrados
+    """prestamos_pago — REMOVED as dead code (was replaced by Movimiento tipo='pago').
+    The table may still exist in legacy databases but the Pago model was deleted.
+    We intentionally skip migrating it to avoid creating orphan data.
+    """
+    print("  prestamos_pago: SKIPPED (Pago model removed from codebase - using Movimiento for payments now).")
+    return 0
 
 
 def sincronizar_secuencias(pg_conn):
@@ -198,7 +181,7 @@ def sincronizar_secuencias(pg_conn):
         "prestamos_cliente",
         "prestamos_prestamo",
         "prestamos_movimiento",
-        "prestamos_pago",
+        # "prestamos_pago"  # intentionally omitted - Pago model was removed (dead code)
     ]
     for tabla in tablas:
         cur.execute(
@@ -233,7 +216,7 @@ def main():
         total += migrar_clientes(sqlite_conn, pg_conn)
         total += migrar_prestamos(sqlite_conn, pg_conn)
         total += migrar_movimientos(sqlite_conn, pg_conn)
-        total += migrar_pagos(sqlite_conn, pg_conn)
+        total += migrar_pagos(sqlite_conn, pg_conn)  # no-op now (Pago model removed)
 
         print("\nSincronizando secuencias...")
         sincronizar_secuencias(pg_conn)

@@ -1,16 +1,102 @@
 {% extends 'base.html' %}
 
-{% block title %}Inicio - Tu App de Préstamos{% endblock %}
+{% block title %}Dashboard - Gestión de Préstamos{% endblock %}
 
 {% block content %}
-<h1 class="mb-4 text-center">Bienvenido</h1>
-<p class="lead text-center">Selecciona una de las opciones disponibles:</p>
+<h1 class="mb-4">Dashboard</h1>
 
-<div class="d-grid gap-3 col-6 mx-auto mt-4">
-
-    <a href="{% url 'prestamos:calculadora_financiera' %}" class="btn btn-primary btn-lg">🧮 Calculadora Financiera</a>
-    <a href="{% url 'prestamos:registrar_prestamo' %}" class="btn btn-success btn-lg">➕ Registrar Nuevo Préstamo</a>
-    <a href="{% url 'prestamos:lista_prestamos' %}" class="btn btn-secondary btn-lg">📋 Ver Lista de Préstamos</a>
-    <a href="{% url 'prestamos:inversiones' %}" class="btn btn-info btn-lg">📈 Ver Inversiones</a>
+<!-- KPIs -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card text-white bg-primary">
+            <div class="card-body">
+                <h6 class="card-subtitle">Total Original</h6>
+                <h3 class="card-title">${{ total_original|floatformat:2 }}</h3>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-white bg-success">
+            <div class="card-body">
+                <h6 class="card-subtitle">Saldo Actual Total</h6>
+                <h3 class="card-title">${{ total_saldo|floatformat:2 }}</h3>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-white bg-info">
+            <div class="card-body">
+                <h6 class="card-subtitle">Préstamos Activos</h6>
+                <h3 class="card-title">{{ activos }} <small class="text-white-50">/ {{ total_prestamos }}</small></h3>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-white bg-secondary">
+            <div class="card-body">
+                <h6 class="card-subtitle">Inactivos / Pagados</h6>
+                <h3 class="card-title">{{ inactivos }}</h3>
+            </div>
+        </div>
+    </div>
 </div>
+
+<!-- Accesos rápidos -->
+<h5 class="mt-4">Accesos Rápidos</h5>
+<div class="d-grid gap-2 d-md-flex mb-4">
+    <a href="{% url 'prestamos:calculadora_financiera' %}" class="btn btn-primary">🧮 Calculadora Financiera</a>
+    <a href="{% url 'prestamos:registrar_prestamo' %}" class="btn btn-success">➕ Registrar Préstamo</a>
+    <a href="{% url 'prestamos:lista_prestamos' %}" class="btn btn-outline-secondary">📋 Ver Todos los Préstamos</a>
+    <a href="{% url 'prestamos:inversiones' %}" class="btn btn-info">📈 Calculadora de Inversiones</a>
+</div>
+
+<!-- Top saldos y actividad reciente -->
+<div class="row">
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">Préstamos con mayor saldo pendiente</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead><tr><th>Cliente</th><th>Saldo</th><th>Acción</th></tr></thead>
+                    <tbody>
+                    {% for p in top_saldos %}
+                    <tr>
+                        <td>{{ p.nombre_cliente }}</td>
+                        <td>${{ p.saldo_actual|floatformat:2 }}</td>
+                        <td><a href="{% url 'prestamos:detalle_prestamo' pk=p.pk %}" class="btn btn-sm btn-outline-primary">Ver</a></td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="3">No hay préstamos activos.</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">Actividad reciente (últimos 7 días)</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead><tr><th>Fecha</th><th>Préstamo</th><th>Tipo</th><th>Monto</th></tr></thead>
+                    <tbody>
+                    {% for m in recientes %}
+                    <tr>
+                        <td>{{ m.fecha|date:"d M" }}</td>
+                        <td><a href="{% url 'prestamos:detalle_prestamo' pk=m.prestamo_id %}">{{ m.prestamo.nombre_cliente|truncatechars:20 }}</a></td>
+                        <td><span class="badge bg-{% if m.tipo == 'pago' %}success{% elif m.tipo == 'incremento_capital' %}warning{% else %}secondary{% endif %}">{{ m.get_tipo_display }}</span></td>
+                        <td>${{ m.monto|floatformat:2 }}</td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="4">Sin movimientos recientes.</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<p class="text-muted small mt-3">Los saldos se actualizan automáticamente al visitar detalles o la lista.</p>
 {% endblock %}

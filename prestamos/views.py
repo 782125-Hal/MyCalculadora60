@@ -1,34 +1,112 @@
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib import messages
+from django.contrib.auth.decorators import login_required
+from django.contrib.auth.mixins import LoginRequiredMixin
 from django.db import transaction
+from django.db.models import Q
+from django.http import HttpResponse
 from django.utils import timezone
 from django.views import View
 from django.views.generic import DetailView
+
 from .models import Cliente, Prestamo, Movimiento
-from .forms import CalculatorForm, RegistrationForm, RegistrarPrestamoForm
-import math
-from decimal import Decimal
-from datetime import date, datetime
+from .forms import (
+    CalculatorForm,
+    RegistrationForm,
+    RegistrarPrestamoForm,
+    PagoForm,
+    IncrementoForm,
+    MovimientoForm,
+    PrestamoEditForm,
+    CrearPrestamoSimpleForm,
+    RegistrarInversionForm,
+)
+from .calculator import (
+    calculate_payment_for_term,
+    calculate_term_for_payment,
+    build_amortization_schedule,
+)
 
+import csv
+import logging
+from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, timedelta
+from datetime import datetime as dt  # for PDF generation (dt.now)
+
+logger = logging.getLogger(__name__)
+
+
+def _csv_safe(value):
+    """Neutraliza fórmulas en exports CSV (CSV/formula injection).
+
+    Excel/Sheets ejecutan celdas que empiezan con = + - @ (o tab/CR). Prefijamos
+    un apóstrofo para que se traten como texto. Devuelve str siempre."""
+    text = '' if value is None else str(value)
+    if text and text[0] in ('=', '+', '-', '@', '\t', '\r'):
+        return "'" + text
+    return text
+
+@login_required
 def home(request):
-    """Vista para la página principal con enlaces a las funcionalidades."""
-    aplicaciones = [
-        {"nombre": "Calculadora de Inversiones", "descripcion": "Evalúa proyectos financieros", "url": "prestamos:inversiones"},
-        {"nombre": "Calculadora Financiera", "url": "prestamos:calculadora_financiera", "descripcion": "Calcula cuotas de préstamos"},
-        {"nombre": "Ver Préstamos", "url": "prestamos:lista_prestamos", "descripcion": "Consulta los préstamos registrados"},
-        {"nombre": "Registrar Préstamo", "url": "prestamos:registrar_prestamo", "descripcion": "Registra un nuevo préstamo"},
-    ]
-    return render(request, 'prestamos/home.html', {'aplicaciones': aplicaciones})
+    """Dashboard principal con KPIs y accesos rápidos."""
+    from django.db.models import Sum
 
+    hoy = timezone.now().date()
+
+    # KPIs básicos — solo los préstamos del usuario autenticado
+    prestamos = Prestamo.objects.filter(owner=request.user)
+    total_original = prestamos.aggregate(total=Sum('monto_original'))['total'] or Decimal('0')
+    total_saldo = prestamos.aggregate(total=Sum('saldo_actual'))['total'] or Decimal('0')
+    activos = prestamos.filter(activo=True).count()
+    inactivos = prestamos.filter(activo=False).count()
+    total_prestamos = prestamos.count()
+
+    # Préstamos con saldo alto (top 5)
+    top_saldos = prestamos.filter(activo=True).order_by('-saldo_actual')[:5]
+
+    # Movimientos recientes (últimos 7 días)
+    recientes = Movimiento.objects.filter(
+        prestamo__owner=request.user,
+        fecha__gte=hoy - timedelta(days=7)
+    ).select_related('prestamo').order_by('-fecha')[:8]
+
+    # Estimación simple de "próximos" (préstamos con pagos esperados pronto - heurística básica)
+    proximos = prestamos.filter(activo=True, saldo_actual__gt=0).order_by('ultimo_pago')[:3]
+
+    context = {
+        'total_original': total_original,
+        'total_saldo': total_saldo,
+        'activos': activos,
+        'inactivos': inactivos,
+        'total_prestamos': total_prestamos,
+        'top_saldos': top_saldos,
+        'recientes': recientes,
+        'proximos': proximos,
+    }
+    return render(request, 'prestamos/home.html', context)
+
+@login_required
 def lista_prestamos(request):
     """Vista para listar todos los préstamos con actualización diaria del saldo (Punto 5)."""
-    prestamos = Prestamo.objects.all()
+    q = request.GET.get('q', '').strip()
+    prestamos = Prestamo.objects.filter(owner=request.user)
+    if q:
+        qs_filter = (
+            Q(nombre_cliente__icontains=q) |
+            Q(telefono__icontains=q)
+        )
+        try:
+            monto_q = Decimal(q.replace(',', '').replace('$', ''))
+            qs_filter |= Q(monto_original=monto_q)
+        except (InvalidOperation, TypeError, ValueError):
+            pass
+        prestamos = prestamos.filter(qs_filter)
     hoy = timezone.now().date()
     for prestamo in prestamos:
         prestamo.actualizar_saldo(hoy)  # Actualiza el saldo considerando pagos e intereses
     return render(request, 'prestamos/lista_prestamos.html', {'prestamos': prestamos})
 
-class CalculadoraView(View):
+class CalculadoraView(LoginRequiredMixin, View):
     """Vista para la calculadora financiera (Puntos 1-2) y registro de préstamo (Punto 3)."""
     def get(self, request):
         form = CalculatorForm(initial={'monto': Decimal('1000000.00')})
@@ -48,30 +126,26 @@ class CalculadoraView(View):
             pago_mensual_input = form.cleaned_data['pago_mensual']
             plazo_meses_input = form.cleaned_data['plazo_meses']
             tipo_calculo = form.cleaned_data['tipo_calculo']
-            r = float(tasa) / 100 / 12  # Tasa mensual
 
+            # Use centralized Decimal calculator (supports only mensual in the old CalculatorForm for now)
             if tipo_calculo == 'pago':
                 n = plazo_meses_input
-                if r == 0:
-                    pago_calculado = float(monto) / n
-                else:
-                    pago_calculado = float(monto) * r * (1 + r)**n / ((1 + r)**n - 1)
-                calculated_payment = Decimal(pago_calculado).quantize(Decimal('0.01'))
-                calculated_term = plazo_meses_input
+                try:
+                    calculated_payment = calculate_payment_for_term(monto, tasa, n, tipo_pago='mensual')
+                except Exception:
+                    calculated_payment = Decimal('0.00')
+                calculated_term = n
                 result = f'Pago mensual calculado: {calculated_payment}'
             elif tipo_calculo == 'plazo':
                 pago = pago_mensual_input
-                if r == 0:
-                    plazo_calculado = math.ceil(float(monto) / float(pago))
-                else:
-                    interest = float(monto) * r
-                    if float(pago) <= interest:
-                        messages.error(request, 'El pago mensual es insuficiente para cubrir los intereses.')
-                        return render(request, 'prestamos/calculadora_financiera.html', {'form': form})
-                    plazo_calculado = math.log(float(pago) / (float(pago) - interest)) / math.log(1 + r)
-                    plazo_calculado = math.ceil(plazo_calculado)
-                calculated_term = plazo_calculado
-                calculated_payment = Decimal(pago)
+                try:
+                    calculated_term = calculate_term_for_payment(monto, tasa, pago, tipo_pago='mensual')
+                except ValueError as e:
+                    messages.error(request, str(e))
+                    return render(request, 'prestamos/calculadora_financiera.html', {'form': form})
+                except Exception:
+                    calculated_term = 0
+                calculated_payment = Decimal(pago).quantize(Decimal('0.01'))
                 result = f'Plazo calculado: {calculated_term} meses'
 
             # Inicializar formulario de registro con datos calculados
@@ -96,6 +170,7 @@ class CalculadoraView(View):
                         plazo_meses = reg_form.cleaned_data['plazo_meses']
                         cliente = Cliente.objects.create(nombre=nombre, telefono='N/A')
                         prestamo = Prestamo(
+                            owner=request.user,
                             cliente=cliente,
                             nombre_cliente=nombre,
                             monto_original=monto,
@@ -110,8 +185,9 @@ class CalculadoraView(View):
                         prestamo.save()
                         messages.success(request, 'Préstamo registrado exitosamente.')
                         return redirect('prestamos:detalle_prestamo', pk=prestamo.pk)
-                except Exception as e:
-                    messages.error(request, f"Error al registrar: {str(e)}")
+                except Exception:
+                    logger.exception("Error al registrar préstamo (user=%s)", request.user.pk)
+                    messages.error(request, "Ocurrió un error al registrar el préstamo. Intenta de nuevo.")
             else:
                 messages.error(request, "Corrija los errores en el formulario de registro.")
 
@@ -122,7 +198,7 @@ class CalculadoraView(View):
         }
         return render(request, 'prestamos/calculadora_financiera.html', context)
 
-class RegistrarPrestamoView(View):
+class RegistrarPrestamoView(LoginRequiredMixin, View):
     """Vista para registrar un préstamo manualmente (Punto 3)."""
     def get(self, request):
         calc_data = request.session.get('calculadora_data', {})
@@ -148,6 +224,7 @@ class RegistrarPrestamoView(View):
                     fecha_inicio = form.cleaned_data['fecha_inicio']
                     cliente = Cliente.objects.create(nombre=nombre, telefono=telefono)
                     prestamo = Prestamo.objects.create(
+                        owner=request.user,
                         cliente=cliente,
                         nombre_cliente=nombre,
                         monto_original=form.cleaned_data['monto_original'],
@@ -163,16 +240,21 @@ class RegistrarPrestamoView(View):
                     if 'calculadora_data' in request.session:
                         del request.session['calculadora_data']
                     return redirect('prestamos:detalle_prestamo', pk=prestamo.pk)
-            except Exception as e:
-                messages.error(request, f"Error al registrar: {str(e)}")
+            except Exception:
+                logger.exception("Error al registrar préstamo manual (user=%s)", request.user.pk)
+                messages.error(request, "Ocurrió un error al registrar el préstamo. Intenta de nuevo.")
         else:
             messages.error(request, "Corrija los errores en el formulario.")
         return render(request, 'prestamos/registrar_prestamo.html', {'form': form})
 
-class PrestamoDetailView(DetailView):
+class PrestamoDetailView(LoginRequiredMixin, DetailView):
     """Vista para mostrar detalles del préstamo con amortización y movimientos (Punto 4)."""
     model = Prestamo
     template_name = 'prestamos/detalle_prestamo.html'
+
+    def get_queryset(self):
+        # Solo permite ver préstamos propios; ajenos → 404 en vez de exponerse.
+        return Prestamo.objects.filter(owner=self.request.user)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -189,86 +271,104 @@ class PrestamoDetailView(DetailView):
         })
         return context
 
+@login_required
 def registrar_pago(request, prestamo_id):
-    """Vista para registrar un pago en un préstamo (Punto 4)."""
+    """Vista para registrar un pago en un préstamo usando PagoForm."""
+    prestamo = get_object_or_404(Prestamo, id=prestamo_id, owner=request.user)
+
     if request.method == 'POST':
-        prestamo = get_object_or_404(Prestamo, id=prestamo_id)
-        monto_str = request.POST.get('monto', '0')
-        fecha_str = request.POST.get('fecha', timezone.now().date().isoformat())
-        descripcion = request.POST.get('descripcion', 'Pago registrado')
-        try:
-            monto = Decimal(monto_str)
-            fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
-            if monto <= 0:
-                raise ValueError("El monto debe ser mayor que cero.")
-            with transaction.atomic():
-                Movimiento.objects.create(
-                    prestamo=prestamo,
-                    fecha=fecha,
-                    monto=monto,
-                    tipo='pago',
-                    descripcion=descripcion
-                )
-                prestamo.actualizar_saldo(fecha)  # Actualiza saldo tras el pago
-                messages.success(request, "Pago registrado exitosamente.")
-        except ValueError as e:
-            messages.error(request, f"Error al registrar el pago: {str(e)}")
-        except Exception as e:
-            messages.error(request, f"Error inesperado: {str(e)}")
+        form = PagoForm(request.POST)
+        if form.is_valid():
+            try:
+                with transaction.atomic():
+                    Movimiento.objects.create(
+                        prestamo=prestamo,
+                        fecha=form.cleaned_data['fecha'],
+                        monto=form.cleaned_data['monto'],
+                        tipo='pago',
+                        descripcion=form.cleaned_data.get('descripcion', 'Pago registrado')
+                    )
+                    prestamo.actualizar_saldo(form.cleaned_data['fecha'])
+                    messages.success(request, "Pago registrado exitosamente.")
+            except Exception:
+                logger.exception("Error al registrar pago (prestamo=%s)", prestamo_id)
+                messages.error(request, "Ocurrió un error al registrar el pago. Intenta de nuevo.")
+        else:
+            for field, errors in form.errors.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}")
         return redirect('prestamos:detalle_prestamo', pk=prestamo_id)
+
     return redirect('prestamos:detalle_prestamo', pk=prestamo_id)
 
+@login_required
 def registrar_incremento(request, prestamo_id):
-    """Vista para registrar un incremento de capital (Punto 4)."""
+    """Vista para registrar un incremento de capital usando IncrementoForm."""
+    prestamo = get_object_or_404(Prestamo, id=prestamo_id, owner=request.user)
+
     if request.method == 'POST':
-        prestamo = get_object_or_404(Prestamo, id=prestamo_id)
-        monto_str = request.POST.get('monto_incremento', '0')
-        fecha_str = request.POST.get('fecha', timezone.now().date().isoformat())
-        descripcion = request.POST.get('descripcion', 'Incremento de Capital')
-        try:
-            monto = Decimal(monto_str)
-            fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
-            if monto <= 0:
-                raise ValueError("El monto debe ser mayor que cero.")
-            with transaction.atomic():
-                prestamo.registrar_incremento(monto, fecha)
-                messages.success(request, "Incremento de capital registrado exitosamente.")
-        except ValueError as e:
-            messages.error(request, f"Error al registrar el incremento: {str(e)}")
-        except Exception as e:
-            messages.error(request, f"Error inesperado: {str(e)}")
+        form = IncrementoForm(request.POST)
+        if form.is_valid():
+            try:
+                with transaction.atomic():
+                    prestamo.registrar_incremento(
+                        form.cleaned_data['monto'],
+                        form.cleaned_data['fecha']
+                    )
+                    messages.success(request, "Incremento de capital registrado exitosamente.")
+            except Exception:
+                logger.exception("Error al registrar incremento (prestamo=%s)", prestamo_id)
+                messages.error(request, "Ocurrió un error al registrar el incremento. Intenta de nuevo.")
+        else:
+            for field, errors in form.errors.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}")
         return redirect('prestamos:detalle_prestamo', pk=prestamo_id)
+
     return redirect('prestamos:detalle_prestamo', pk=prestamo_id)
 
+@login_required
 def editar_movimiento(request, movimiento_id):
-    """Vista para editar un movimiento existente (Punto 4)."""
-    movimiento = get_object_or_404(Movimiento, id=movimiento_id)
+    """Vista para editar un movimiento existente usando MovimientoForm."""
+    movimiento = get_object_or_404(Movimiento, id=movimiento_id, prestamo__owner=request.user)
     prestamo_id = movimiento.prestamo.id
+
     if request.method == 'POST':
-        try:
-            nuevo_monto = Decimal(request.POST.get('monto', '0'))
-            nueva_fecha = datetime.strptime(
-                request.POST.get('fecha', timezone.now().date().isoformat()), '%Y-%m-%d'
-            ).date()
-            if nuevo_monto <= 0:
-                raise ValueError("El monto debe ser mayor que cero.")
-            with transaction.atomic():
-                movimiento.monto = nuevo_monto
-                movimiento.fecha = nueva_fecha
-                movimiento.descripcion = request.POST.get('descripcion', movimiento.descripcion)
-                movimiento.save()
-                movimiento.prestamo.actualizar_saldo()  # Recalcula saldo
-                messages.success(request, "Movimiento editado exitosamente.")
-                return redirect('prestamos:detalle_prestamo', pk=prestamo_id)
-        except ValueError as e:
-            messages.error(request, f"Error al editar el movimiento: {str(e)}")
-        except Exception as e:
-            messages.error(request, f"Error inesperado: {str(e)}")
+        form = MovimientoForm(request.POST)
+        if form.is_valid():
+            try:
+                with transaction.atomic():
+                    movimiento.monto = form.cleaned_data['monto']
+                    movimiento.fecha = form.cleaned_data['fecha']
+                    movimiento.descripcion = form.cleaned_data.get('descripcion', movimiento.descripcion)
+                    movimiento.save()
+                    movimiento.prestamo.actualizar_saldo()
+                    messages.success(request, "Movimiento editado exitosamente.")
+                    return redirect('prestamos:detalle_prestamo', pk=prestamo_id)
+            except Exception:
+                logger.exception("Error al editar movimiento (movimiento=%s)", movimiento_id)
+                messages.error(request, "Ocurrió un error al editar el movimiento. Intenta de nuevo.")
+        else:
+            for field, errors in form.errors.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}")
+    else:
+        # Pre-llenar el formulario para GET
+        form = MovimientoForm(initial={
+            'monto': movimiento.monto,
+            'fecha': movimiento.fecha,
+            'descripcion': movimiento.descripcion,
+        })
+        # Pasamos el form al template (el template actual usa request.POST directo;
+        # por compatibilidad mínima seguimos renderizando, pero el form ya valida)
+        # Para no romper el template actual de inmediato, seguimos usando el render original.
+
     return render(request, 'prestamos/editar_movimiento.html', {'movimiento': movimiento})
 
+@login_required
 def borrar_movimiento(request, movimiento_id):
     """Vista para borrar un movimiento (Punto 4)."""
-    movimiento = get_object_or_404(Movimiento, id=movimiento_id)
+    movimiento = get_object_or_404(Movimiento, id=movimiento_id, prestamo__owner=request.user)
     prestamo_id = movimiento.prestamo.id
     if request.method == 'POST':
         try:
@@ -277,130 +377,361 @@ def borrar_movimiento(request, movimiento_id):
                 movimiento.delete()
                 prestamo.actualizar_saldo()  # Recalcula saldo con referencia segura
                 messages.success(request, "Movimiento borrado exitosamente.")
-        except Exception as e:
-            messages.error(request, f"Error al borrar el movimiento: {str(e)}")
+        except Exception:
+            logger.exception("Error al borrar movimiento (movimiento=%s)", movimiento_id)
+            messages.error(request, "Ocurrió un error al borrar el movimiento. Intenta de nuevo.")
     return redirect('prestamos:detalle_prestamo', pk=prestamo_id)
 
+@login_required
 def editar_prestamo(request, prestamo_id):
-    """Vista para editar los datos de un préstamo."""
-    prestamo = get_object_or_404(Prestamo, id=prestamo_id)
+    """Vista para editar los datos de un préstamo usando PrestamoEditForm."""
+    prestamo = get_object_or_404(Prestamo, id=prestamo_id, owner=request.user)
+
     if request.method == 'POST':
-        try:
-            monto = Decimal(request.POST.get('monto_original', prestamo.monto_original))
-            tasa_interes_anual = Decimal(request.POST.get('tasa_interes_anual', prestamo.tasa_interes_anual))
-            tipo_pago = request.POST.get('tipo_pago', prestamo.tipo_pago)
-            if monto <= 0 or tasa_interes_anual < 0:
-                raise ValueError("El monto debe ser mayor que cero y la tasa no puede ser negativa.")
-            with transaction.atomic():
-                prestamo.monto_original = monto
-                prestamo.tasa_interes_anual = tasa_interes_anual
-                prestamo.tipo_pago = tipo_pago
-                prestamo.saldo_actual = monto  # Resetear saldo
-                prestamo.save()
-                prestamo.actualizar_saldo()  # Recalcula saldo
-                messages.success(request, "Préstamo actualizado exitosamente.")
-                return redirect('prestamos:detalle_prestamo', pk=prestamo_id)
-        except ValueError as e:
-            messages.error(request, f"Error al actualizar el préstamo: {str(e)}")
-        except Exception as e:
-            messages.error(request, f"Error inesperado: {str(e)}")
+        form = PrestamoEditForm(request.POST)
+        if form.is_valid():
+            try:
+                with transaction.atomic():
+                    prestamo.monto_original = form.cleaned_data['monto_original']
+                    prestamo.tasa_interes_anual = form.cleaned_data['tasa_interes_anual']
+                    prestamo.tipo_pago = form.cleaned_data['tipo_pago']
+                    prestamo.saldo_actual = prestamo.monto_original  # Reset
+                    prestamo.save()
+                    prestamo.actualizar_saldo()
+                    messages.success(request, "Préstamo actualizado exitosamente.")
+                    return redirect('prestamos:detalle_prestamo', pk=prestamo_id)
+            except Exception:
+                logger.exception("Error al actualizar préstamo (prestamo=%s)", prestamo_id)
+                messages.error(request, "Ocurrió un error al actualizar el préstamo. Intenta de nuevo.")
+        else:
+            for field, errors in form.errors.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}")
+    # (No inicializamos el form en GET porque el template actual usa el objeto prestamo directamente)
+
     return render(request, 'prestamos/editar_prestamo.html', {'prestamo': prestamo})
 
+@login_required
 def delete_prestamo(request, prestamo_id):
     """Vista para eliminar un préstamo (Punto 4)."""
-    prestamo = get_object_or_404(Prestamo, id=prestamo_id)
+    prestamo = get_object_or_404(Prestamo, id=prestamo_id, owner=request.user)
     if request.method == 'POST':
         try:
             with transaction.atomic():
                 prestamo.delete()  # Deletes loan and related movements due to CASCADE
                 messages.success(request, f"El préstamo #{prestamo_id} ha sido eliminado exitosamente.")
                 return redirect('prestamos:lista_prestamos')
-        except Exception as e:
-            messages.error(request, f"Error al eliminar el préstamo: {str(e)}")
+        except Exception:
+            logger.exception("Error al eliminar préstamo (prestamo=%s)", prestamo_id)
+            messages.error(request, "Ocurrió un error al eliminar el préstamo. Intenta de nuevo.")
     return render(request, 'prestamos/confirmar_borrado.html', {
         'prestamo': prestamo,
         'titulo': 'Confirmar Eliminación',
         'mensaje_confirmacion': '¿Está seguro de eliminar este préstamo?'
     })
 
+@login_required
 def crear_prestamo(request):
     """Vista para crear un préstamo desde un formulario simple."""
     if request.method == 'POST':
-        try:
-            cliente_id = request.POST.get('cliente')
-            monto = Decimal(request.POST.get('monto_original'))
-            tipo_pago = request.POST.get('tipo_pago')
-            fecha_inicio = datetime.strptime(request.POST.get('fecha_inicio'), '%Y-%m-%d').date()
-            tasa_interes_anual = Decimal(request.POST.get('tasa_interes_anual'))
-            plazo_periodos = int(request.POST.get('plazo_periodos', 36))
-            cliente = Cliente.objects.get(id=cliente_id)
-            with transaction.atomic():
-                prestamo = Prestamo.objects.create(
-                    cliente=cliente,
-                    nombre_cliente=cliente.nombre,
-                    monto_original=monto,
-                    tipo_pago=tipo_pago,
-                    fecha_inicio=fecha_inicio,
-                    tasa_interes_anual=tasa_interes_anual,
-                    saldo_actual=monto,
-                    plazo_meses=plazo_periodos
-                )
-                messages.success(request, "Préstamo creado exitosamente.")
-                return redirect('prestamos:detalle_prestamo', pk=prestamo.pk)
-        except ValueError as e:
-            messages.error(request, f"Error al crear el préstamo: {str(e)}")
-        except Exception as e:
-            messages.error(request, f"Error inesperado: {str(e)}")
+        form = CrearPrestamoSimpleForm(request.POST)
+        if form.is_valid():
+            try:
+                cliente = form.cleaned_data['cliente']
+                monto = form.cleaned_data['monto']
+                with transaction.atomic():
+                    prestamo = Prestamo.objects.create(
+                        owner=request.user,
+                        cliente=cliente,
+                        nombre_cliente=cliente.nombre,
+                        monto_original=monto,
+                        tipo_pago=form.cleaned_data['tipo_pago'],
+                        fecha_inicio=form.cleaned_data['fecha_inicio'],
+                        tasa_interes_anual=form.cleaned_data['tasa_interes_anual'],
+                        saldo_actual=monto,
+                        plazo_meses=form.cleaned_data['periodos_totales'],
+                    )
+                    messages.success(request, "Préstamo creado exitosamente.")
+                    return redirect('prestamos:detalle_prestamo', pk=prestamo.pk)
+            except Exception:
+                logger.exception("Error al crear préstamo (user=%s)", request.user.pk)
+                messages.error(request, "Ocurrió un error al crear el préstamo. Intenta de nuevo.")
+        else:
+            for field, errors in form.errors.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}")
     clientes = Cliente.objects.all()
     return render(request, 'prestamos/crear_prestamo.html', {'clientes': clientes})
 
+@login_required
 def inversiones(request):
     """Vista para la calculadora de inversiones."""
     return render(request, 'prestamos/inversiones.html', {'title': 'Calculadora de Inversiones'})
 
+@login_required
 def registrar_inversion(request):
-    """Vista para registrar una inversión como préstamo."""
+    """Vista para registrar una inversión como préstamo + sus movimientos simulados."""
     if request.method == 'POST':
+        form = RegistrarInversionForm(request.POST)
+        if not form.is_valid():
+            for field, errors in form.errors.items():
+                for error in errors:
+                    messages.error(request, f"{field}: {error}")
+            return render(request, 'prestamos/inversiones.html')
+
+        # Tipos de movimiento permitidos desde el frontend (evita valores arbitrarios).
+        TIPOS_MOV_VALIDOS = {'pago', 'incremento_capital'}
+
         try:
-            inversion_inicial = Decimal(request.POST.get('inversionInicial'))
-            tasa_descuento = Decimal(request.POST.get('tasaDescuento'))
-            anos = int(request.POST.get('anos', 0))
-            if inversion_inicial <= 0 or anos <= 0:
-                raise ValueError("Valores inválidos para inversión.")
+            inversion_inicial = form.cleaned_data['inversionInicial']
+            tasa_descuento = form.cleaned_data['tasaDescuento']
+            anos = form.cleaned_data['anos']
+            fecha_base = form.cleaned_data.get('fecha_inicio_simulacion') or timezone.now().date()
+
             with transaction.atomic():
                 cliente = Cliente.objects.create(nombre="Inversión Automática", telefono="N/A")
                 prestamo = Prestamo.objects.create(
+                    owner=request.user,
                     cliente=cliente,
                     nombre_cliente="Inversión Automática",
                     monto_original=inversion_inicial,
                     tipo_pago="mensual",
-                    fecha_inicio=timezone.now().date(),
+                    fecha_inicio=fecha_base,
                     tasa_interes_anual=tasa_descuento,
                     saldo_actual=inversion_inicial,
                     plazo_meses=anos * 12
                 )
-                messages.success(request, "Inversión registrada exitosamente.")
+
+                # Crear movimientos a partir de la simulación enviada por el frontend
+                # Esperamos campos: movimiento_fecha_0, movimiento_monto_0, movimiento_tipo_0, ...
+                idx = 0
+                while True:
+                    fecha_str = request.POST.get(f'movimiento_fecha_{idx}')
+                    monto_str = request.POST.get(f'movimiento_monto_{idx}')
+                    tipo = request.POST.get(f'movimiento_tipo_{idx}')
+
+                    if not fecha_str or not monto_str or not tipo:
+                        break
+
+                    try:
+                        mov_fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+                        mov_monto = Decimal(monto_str)
+                        if mov_monto > 0 and tipo in TIPOS_MOV_VALIDOS:
+                            Movimiento.objects.create(
+                                prestamo=prestamo,
+                                fecha=mov_fecha,
+                                monto=mov_monto,
+                                tipo=tipo,  # 'incremento_capital' para ingresos, 'pago' para retiros
+                                descripcion=f"Simulado - Año {idx+1}"
+                            )
+                    except (ValueError, TypeError, InvalidOperation):
+                        pass
+                    idx += 1
+
+                # Si no se enviaron movimientos detallados, al menos crear el inicial
+                if idx == 0:
+                    Movimiento.objects.create(
+                        prestamo=prestamo,
+                        fecha=fecha_base,
+                        monto=inversion_inicial,
+                        tipo='incremento_capital',
+                        descripcion='Inversión inicial'
+                    )
+
+                messages.success(request, "Inversión registrada exitosamente con sus movimientos.")
                 return redirect('prestamos:detalle_prestamo', pk=prestamo.pk)
-        except ValueError as e:
-            messages.error(request, f"Error al registrar la inversión: {str(e)}")
-        except Exception as e:
-            messages.error(request, f"Error inesperado: {str(e)}")
+
+        except Exception:
+            logger.exception("Error al registrar inversión (user=%s)", request.user.pk)
+            messages.error(request, "Ocurrió un error al registrar la inversión. Intenta de nuevo.")
+
     return render(request, 'prestamos/inversiones.html')
 
-def calcular_pago_mensual(monto, tasa_anual, plazo_meses):
-    """Función auxiliar para calcular el pago mensual (Punto 1)."""
-    tasa_mensual = float(tasa_anual) / 12 / 100
-    if tasa_mensual == 0:
-        return Decimal(monto) / plazo_meses
-    pago = float(monto) * tasa_mensual * (1 + tasa_mensual) ** plazo_meses / ((1 + tasa_mensual) ** plazo_meses - 1)
-    return Decimal(pago).quantize(Decimal('0.01'))
+# Cálculos centralizados en prestamos/calculator.py
+# (calculate_payment_for_term, calculate_term_for_payment, build_amortization_schedule, etc.)
+# Las funciones auxiliares antiguas con float() fueron removidas.
 
-def calcular_plazo_meses(monto, tasa_anual, pago_mensual):
-    """Función auxiliar para calcular el plazo en meses (Punto 2)."""
-    tasa_mensual = float(tasa_anual) / 12 / 100
-    if tasa_mensual == 0:
-        return math.ceil(float(monto) / float(pago_mensual))
-    if float(pago_mensual) <= float(monto) * tasa_mensual:
-        raise ValueError("El pago mensual es insuficiente para cubrir los intereses.")
-    plazo = math.log(float(pago_mensual) / (float(pago_mensual) - float(monto) * tasa_mensual)) / math.log(1 + tasa_mensual)
-    return math.ceil(plazo)
+
+# ============================================================
+# Exportaciones CSV (Fase 3)
+# ============================================================
+
+@login_required
+def export_prestamos_csv(request):
+    """Exporta todos los préstamos a CSV."""
+    response = HttpResponse(content_type='text/csv; charset=utf-8')
+    response['Content-Disposition'] = 'attachment; filename="prestamos.csv"'
+
+    writer = csv.writer(response)
+    writer.writerow([
+        'ID', 'Cliente', 'Monto Original', 'Saldo Actual', 'Tasa %',
+        'Tipo Pago', 'Modo', 'Fecha Inicio', 'Activo', 'Ultimo Pago'
+    ])
+
+    for p in Prestamo.objects.filter(owner=request.user).order_by('-fecha_inicio'):
+        writer.writerow([
+            p.id,
+            _csv_safe(p.nombre_cliente),
+            p.monto_original,
+            p.saldo_actual,
+            p.tasa_interes_anual,
+            p.tipo_pago,
+            p.modo,
+            p.fecha_inicio,
+            'Sí' if p.activo else 'No',
+            p.ultimo_pago or '',
+        ])
+    return response
+
+
+@login_required
+def export_prestamo_csv(request, pk):
+    """Exporta movimientos + tabla de amortización de un préstamo específico."""
+    prestamo = get_object_or_404(Prestamo, pk=pk, owner=request.user)
+    response = HttpResponse(content_type='text/csv; charset=utf-8')
+    response['Content-Disposition'] = f'attachment; filename="prestamo_{pk}.csv"'
+
+    writer = csv.writer(response)
+
+    # Encabezado del préstamo
+    writer.writerow(['PRESTAMO', _csv_safe(prestamo.nombre_cliente), 'ID', prestamo.id])
+    writer.writerow(['Monto Original', prestamo.monto_original, 'Saldo Actual', prestamo.saldo_actual])
+    writer.writerow(['Tasa Anual %', prestamo.tasa_interes_anual, 'Tipo', prestamo.tipo_pago])
+    writer.writerow([])
+
+    # Movimientos
+    writer.writerow(['MOVIMIENTOS'])
+    writer.writerow(['Fecha', 'Tipo', 'Monto', 'Descripción'])
+    for m in prestamo.movimientos.order_by('fecha'):
+        writer.writerow([m.fecha, m.tipo, m.monto, _csv_safe(m.descripcion)])
+
+    writer.writerow([])
+
+    # Amortización
+    writer.writerow(['TABLA DE AMORTIZACIÓN (proyectada)'])
+    writer.writerow(['Periodo', 'Fecha', 'Pago', 'Interés', 'Capital', 'Saldo'])
+    for fila in prestamo.get_amortizacion():
+        writer.writerow([
+            fila['periodo'],
+            fila['fecha'],
+            fila['pago'],
+            fila['interes'],
+            fila['capital'],
+            fila['saldo'],
+        ])
+
+    return response
+
+
+# ============================================================
+# Reportes PDF (Fase 3) - requiere reportlab
+# ============================================================
+
+@login_required
+def export_prestamo_pdf(request, pk):
+    """Genera un PDF simple de Estado de Cuenta / Amortización usando reportlab."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.units import inch
+    from io import BytesIO
+
+    prestamo = get_object_or_404(Prestamo, pk=pk, owner=request.user)
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter,
+                            rightMargin=0.5*inch, leftMargin=0.5*inch,
+                            topMargin=0.5*inch, bottomMargin=0.5*inch)
+
+    styles = getSampleStyleSheet()
+    elements = []
+
+    # Título
+    elements.append(Paragraph(f"Estado de Cuenta - Préstamo #{prestamo.id}", styles['Title']))
+    elements.append(Paragraph(f"Cliente: {prestamo.nombre_cliente}", styles['Normal']))
+    elements.append(Spacer(1, 12))
+
+    # Datos básicos
+    data = [
+        ['Monto Original', f'${prestamo.monto_original:,.2f}'],
+        ['Saldo Actual', f'${prestamo.saldo_actual:,.2f}'],
+        ['Tasa Anual', f'{prestamo.tasa_interes_anual}%'],
+        ['Frecuencia', prestamo.tipo_pago.title()],
+        ['Modo', prestamo.modo],
+        ['Fecha Inicio', str(prestamo.fecha_inicio)],
+        ['Estado', 'Activo' if prestamo.activo else 'Pagado/Cancelado'],
+    ]
+    t = Table(data, colWidths=[2.5*inch, 3*inch])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
+        ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+    ]))
+    elements.append(t)
+    elements.append(Spacer(1, 20))
+
+    # Movimientos recientes
+    elements.append(Paragraph("<b>Movimientos (últimos)</b>", styles['Heading3']))
+    mov_data = [['Fecha', 'Tipo', 'Monto', 'Descripción']]
+    for m in prestamo.movimientos.order_by('-fecha')[:10]:
+        mov_data.append([
+            str(m.fecha),
+            m.get_tipo_display(),
+            f'${m.monto:,.2f}',
+            (m.descripcion or '')[:40]
+        ])
+    if len(mov_data) == 1:
+        mov_data.append(['-', '-', '-', 'Sin movimientos'])
+    t2 = Table(mov_data, colWidths=[1.2*inch, 1.5*inch, 1.2*inch, 2.5*inch])
+    t2.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0.2, 0.3, 0.5)),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
+    ]))
+    elements.append(t2)
+    elements.append(Spacer(1, 20))
+
+    # Tabla de amortización
+    elements.append(Paragraph("<b>Tabla de Amortización (Proyectada)</b>", styles['Heading3']))
+    amort = prestamo.get_amortizacion()
+    amort_data = [['Periodo', 'Fecha', 'Pago', 'Interés', 'Capital', 'Saldo']]
+    for fila in amort[:25]:  # Limitar filas
+        amort_data.append([
+            fila['periodo'],
+            str(fila['fecha']),
+            f"${fila['pago']:,.2f}",
+            f"${fila['interes']:,.2f}",
+            f"${fila['capital']:,.2f}",
+            f"${fila['saldo']:,.2f}",
+        ])
+    if len(amort) > 25:
+        amort_data.append(['...', '...', '...', '...', '...', '...'])
+    t3 = Table(amort_data, colWidths=[0.7*inch, 1.1*inch, 1.1*inch, 1.1*inch, 1.1*inch, 1.1*inch])
+    t3.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0.2, 0.3, 0.5)),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('ALIGN', (2, 1), (-1, -1), 'RIGHT'),
+    ]))
+    elements.append(t3)
+
+    elements.append(Spacer(1, 30))
+    elements.append(Paragraph(f"Generado el {dt.now().strftime('%Y-%m-%d %H:%M')}", styles['Normal']))
+
+    doc.build(elements)
+    buffer.seek(0)
+
+    response = HttpResponse(buffer, content_type='application/pdf')
+    response['Content-Disposition'] = f'attachment; filename="estado_cuenta_prestamo_{pk}.pdf"'
+    return response

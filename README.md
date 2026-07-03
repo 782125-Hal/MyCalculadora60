@@ -40,6 +40,13 @@ python manage.py runserver
 
 Abre `http://127.0.0.1:8000/` en tu navegador.
 
+**Nota (desde Fase 2):** Toda la aplicación requiere iniciar sesión. 
+Crea un superusuario con:
+```bash
+python manage.py createsuperuser
+```
+Luego inicia sesión en `/accounts/login/`. La API también requiere autenticación (usa la sesión del navegador o Basic Auth).
+
 ---
 
 ## Variables de entorno requeridas

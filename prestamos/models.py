@@ -1,17 +1,16 @@
-# models.py - Código corregido y funcional.
-# Correcciones principales:
-# - Cambiado 'from datetime import date' a 'import datetime' para resolver NameError en default=datetime.date.today.
-# - Agregado campo 'modo' al modelo Prestamo para manejar 'fixed_term' o 'fixed_payment' en get_amortizacion.
-# - Renombrado 'pago_fijo' a 'pago_mensual' en get_amortizacion para consistencia con el campo existente.
-# - Renombrado 'plazo_periodos' a 'plazo_meses' en get_amortizacion para consistencia.
-# - Ajustado choices en Movimiento para consistencia en minúsculas/mayúsculas (usar minúsculas en código para tipo).
-# - Asegurada consistencia en tipos ('pago' en minúsculas en actualizar_saldo y choices).
-# - En get_amortizacion, ajustado para manejar 'semanal' correctamente (delta y tasa).
-# - En actualizar_saldo, ajustado para manejar movimientos correctamente y evitar loops infinitos.
-# - Agregado manejo para tipo_pago 'semanal' en todos los métodos.
-# - Asegurado que saldo_actual se inicialice correctamente en save().
-# - No se necesita tool code_execution ya que las correcciones son directas; el código ahora es ejecutable.
+"""
+Prestamos models.
 
+Core business models:
+- Cliente
+- Prestamo (con dos modos: fixed_term / fixed_payment y frecuencia mensual/semanal)
+- Movimiento (pagos, incrementos de capital, y cargos automáticos de interés)
+
+La lógica de amortización pura vive en prestamos/calculator.py.
+actualizar_saldo() es intencionalmente stateful (recalcula y persiste cargos de mora).
+"""
+
+from django.conf import settings
 from django.db import models
 from decimal import Decimal
 import datetime  # Import corregido para datetime.date.today
@@ -30,6 +29,14 @@ class Cliente(models.Model):
         return self.nombre
 
 class Prestamo(models.Model):
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='prestamos',
+        help_text='Usuario propietario del préstamo. Aísla los datos entre cuentas.'
+    )
     cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, null=True,
                                 blank=True)  # Relación opcional con Cliente
     nombre_cliente = models.CharField(max_length=200,
@@ -58,30 +65,54 @@ class Prestamo(models.Model):
         super().save(*args, **kwargs)
 
     def actualizar_saldo(self, fecha_actual=None):
+        """
+        Recalcula el saldo_actual del préstamo hasta 'fecha_actual' (o hoy).
+
+        Comportamiento:
+        - Simula período por período (mensual o semanal según tipo_pago).
+        - Aplica todos los Movimientos (pagos, incrementos, cargos previos) en orden.
+        - Si un período completo transcurrió SIN ningún pago, genera automáticamente
+          un Movimiento de tipo 'interes_cargo' (evita duplicados).
+        - Actualiza saldo_actual, activo (si saldo <= 0), y ultimo_pago.
+        - Persiste los cambios (y los nuevos cargos de interés).
+
+        Este método tiene side-effects intencionales (crea registros de interés
+        y hace save). Se llama desde vistas de lista/detalle y acciones de pago.
+        """
         if not self.activo:
             return self.saldo_actual
+
         if fecha_actual is None:
             fecha_actual = datetime.date.today()
+
+        from .calculator import get_period_rate_and_delta
+
         balance = Decimal(self.monto_original)
         fecha_periodo_start = self.fecha_inicio
-        if self.tipo_pago == 'mensual':
-            tasa_periodo = Decimal(self.tasa_interes_anual) / Decimal(100) / Decimal(12)
-            delta = relativedelta(months=1)
-        else:  # 'semanal'
-            tasa_periodo = Decimal(self.tasa_interes_anual) / Decimal(100) / Decimal(52)
-            delta = relativedelta(weeks=1)
+
+        delta, tasa_periodo = get_period_rate_and_delta(
+            self.tasa_interes_anual, self.tipo_pago
+        )
+
         movimientos = list(self.movimientos.order_by('fecha'))
-        # Pre-cargar fechas de cargos existentes para evitar queries N+1 dentro del loop
+
+        # Pre-cargar para evitar queries N+1 al decidir si crear cargo
         fechas_cargo_existentes = set(
             self.movimientos.filter(tipo='interes_cargo').values_list('fecha', flat=True)
         )
+
         mov_index = 0
         num_mov = len(movimientos)
+
+        # 1) Avanzar período por período hasta la fecha objetivo
         while fecha_periodo_start < fecha_actual:
             fecha_esperada = fecha_periodo_start + delta
             pago_en_periodo = False
-            # Aplicar todos los movimientos en el período (después de fecha_periodo_start hasta fecha_esperada)
-            while mov_index < num_mov and movimientos[mov_index].fecha <= fecha_esperada and movimientos[mov_index].fecha > fecha_periodo_start:
+
+            # Aplicar movimientos ocurridos en este período
+            while (mov_index < num_mov and
+                   movimientos[mov_index].fecha <= fecha_esperada and
+                   movimientos[mov_index].fecha > fecha_periodo_start):
                 mov = movimientos[mov_index]
                 if mov.tipo == 'pago':
                     balance -= mov.monto
@@ -91,7 +122,8 @@ class Prestamo(models.Model):
                 elif mov.tipo == 'interes_cargo':
                     balance += mov.monto
                 mov_index += 1
-            # Si no hay pago en el período y el período está completo (<= fecha_actual)
+
+            # Cargo automático de interés si el período se completó sin pagos
             if fecha_esperada <= fecha_actual and not pago_en_periodo:
                 if fecha_esperada not in fechas_cargo_existentes:
                     intereses = balance * tasa_periodo
@@ -104,8 +136,10 @@ class Prestamo(models.Model):
                         descripcion='Cargo por período no pagado'
                     )
                     fechas_cargo_existentes.add(fecha_esperada)
+
             fecha_periodo_start = fecha_esperada
-        # Aplicar movimientos restantes después del último período completo y <= fecha_actual
+
+        # 2) Aplicar cualquier movimiento restante hasta la fecha actual
         while mov_index < num_mov and movimientos[mov_index].fecha <= fecha_actual:
             mov = movimientos[mov_index]
             if mov.tipo == 'pago':
@@ -115,79 +149,34 @@ class Prestamo(models.Model):
             elif mov.tipo == 'interes_cargo':
                 balance += mov.monto
             mov_index += 1
+
+        # 3) Persistir estado final
         self.saldo_actual = max(balance, Decimal('0.00'))
-        # Actualizar ultimo_pago
-        pagos = [mov.fecha for mov in movimientos if mov.tipo == 'pago' and mov.fecha <= fecha_actual]
+
+        pagos = [
+            mov.fecha for mov in movimientos
+            if mov.tipo == 'pago' and mov.fecha <= fecha_actual
+        ]
         self.ultimo_pago = max(pagos) if pagos else None
+
         if self.saldo_actual <= Decimal('0.00'):
             self.activo = False
+
         super().save()
         return self.saldo_actual
 
     def get_amortizacion(self):
-        amortizacion = []
-        balance = self.monto_original
-        if self.tipo_pago == 'mensual':
-            tasa_periodo = self.tasa_interes_anual / Decimal(100) / Decimal(12)
-            delta = relativedelta(months=1)
-        else:  # 'semanal'
-            tasa_periodo = self.tasa_interes_anual / Decimal(100) / Decimal(52)
-            delta = relativedelta(weeks=1)
-        fecha = self.fecha_inicio + delta
-        periodo = 1
-        if self.modo == 'fixed_term':
-            if self.plazo_meses is None or self.plazo_meses <= 0:
-                return []
-            if tasa_periodo == 0:
-                pago = balance / Decimal(self.plazo_meses)
-            else:
-                tmp = (Decimal(1) + tasa_periodo) ** self.plazo_meses
-                pago = balance * tasa_periodo * tmp / (tmp - Decimal(1))
-            while periodo <= self.plazo_meses and balance > 0:
-                intereses = balance * tasa_periodo
-                capital = pago - intereses
-                if capital > balance:
-                    capital = balance
-                    pago = intereses + capital
-                balance -= capital
-                amortizacion.append({
-                    'periodo': periodo,
-                    'fecha': fecha,
-                    'pago': float(pago.quantize(Decimal('0.01'))),
-                    'interes': float(intereses.quantize(Decimal('0.01'))),
-                    'capital': float(capital.quantize(Decimal('0.01'))),
-                    'saldo': float(balance.quantize(Decimal('0.01')))
-                })
-                fecha += delta
-                periodo += 1
-        elif self.modo == 'fixed_payment':
-            if self.pago_mensual is None or self.pago_mensual <= 0:
-                return []
-            pago_fixed = self.pago_mensual  # Usar pago_mensual en lugar de pago_fijo
-            max_periodos = 10000  # Límite para evitar loops infinitos
-            while balance > 0 and periodo <= max_periodos:
-                intereses = balance * tasa_periodo
-                capital = pago_fixed - intereses
-                pago = pago_fixed
-                if capital >= 0:
-                    if capital > balance:
-                        capital = balance
-                        pago = intereses + capital
-                # Si capital < 0, balance aumenta (interés > pago)
-                balance -= capital
-                amortizacion.append({
-                    'periodo': periodo,
-                    'fecha': fecha,
-                    'pago': float(pago.quantize(Decimal('0.01'))),
-                    'interes': float(intereses.quantize(Decimal('0.01'))),
-                    'capital': float(capital.quantize(Decimal('0.01'))),
-                    'saldo': float(balance.quantize(Decimal('0.01')))
-                })
-                if balance <= 0:
-                    break
-                fecha += delta
-                periodo += 1
-        return amortizacion
+        """Delegates to the centralized pure calculator (see prestamos/calculator.py)."""
+        from .calculator import build_amortization_schedule
+        return build_amortization_schedule(
+            monto=self.monto_original,
+            tasa_anual=self.tasa_interes_anual,
+            modo=self.modo,
+            tipo_pago=self.tipo_pago,
+            plazo=self.plazo_meses,
+            pago_fijo=self.pago_mensual,
+            fecha_inicio=self.fecha_inicio,
+        )
 
     def registrar_incremento(self, monto_incremento, fecha):
         if monto_incremento > 0:
@@ -213,11 +202,3 @@ class Movimiento(models.Model):
     def __str__(self):
         return f"{self.tipo.capitalize()} {self.id} - {self.monto} ({self.fecha})"
 
-# models.py
-class Pago(models.Model):
-    prestamo = models.ForeignKey(Prestamo, on_delete=models.CASCADE, related_name='pagos')
-    fecha = models.DateField(default=timezone.now)
-    monto = models.DecimalField(max_digits=10, decimal_places=2)
-
-    def __str__(self):
-        return f"Pago {self.monto} el {self.fecha}"
