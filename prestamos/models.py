@@ -134,7 +134,9 @@ class Prestamo(models.Model):
             # Cargo automático de interés si el período se completó sin pagos
             if fecha_esperada <= fecha_actual and not pago_en_periodo:
                 if fecha_esperada not in fechas_cargo_existentes:
-                    intereses = balance * tasa_periodo
+                    # Regla de negocio: interés plano = una mensualidad, sin acumular
+                    # el saldo. pago_mensual None/0 => cargo 0 (regla literal, sin fallback).
+                    intereses = (self.pago_mensual or Decimal('0')) * tasa_periodo
                     balance += intereses
                     Movimiento.objects.create(
                         prestamo=self,

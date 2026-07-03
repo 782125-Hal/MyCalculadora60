@@ -12,6 +12,7 @@ Cubre:
 
 from decimal import Decimal
 from datetime import date, timedelta
+from dateutil.relativedelta import relativedelta
 
 from django.test import TestCase
 from django.utils import timezone
@@ -228,6 +229,67 @@ class PrestamoActualizarSaldoTest(TestCase):
         prestamo.actualizar_saldo(self.hoy)
         # Con tasa 0 y sin pagos, el saldo no debe haber crecido
         self.assertEqual(prestamo.saldo_actual, Decimal('2000.00'))
+
+    # --- Nueva regla de negocio: interés = pago_mensual * tasa_periodo (plano) ---
+
+    def test_interes_es_pago_mensual_por_tasa_plano(self):
+        """(a) Un mes vencido sin pago cobra pago_mensual * tasa_periodo, no balance * tasa."""
+        # monto grande para probar que el interés NO depende del balance.
+        prestamo = Prestamo.objects.create(
+            cliente=self.cliente, nombre_cliente="Plano 1",
+            monto_original=Decimal('100000'), tasa_interes_anual=Decimal('12'),  # tasa_periodo mensual = 0.01
+            tipo_pago='mensual', modo='fixed_payment', pago_mensual=Decimal('1000'),
+            saldo_actual=Decimal('100000'), fecha_inicio=self.hoy - relativedelta(months=1),
+        )
+        prestamo.actualizar_saldo(self.hoy)
+        cargos = prestamo.movimientos.filter(tipo='interes_cargo')
+        self.assertEqual(cargos.count(), 1)
+        # 1000 * (12%/12) = 10.00 — independiente del balance de 100000.
+        self.assertEqual(cargos.first().monto, Decimal('10.00'))
+        self.assertEqual(prestamo.saldo_actual, Decimal('100010.00'))
+
+    def test_varios_meses_sin_pago_cobran_una_mensualidad_cada_uno(self):
+        """(b) 5 meses vencidos → 5 cargos iguales (flat), sin acumular sobre el saldo."""
+        prestamo = Prestamo.objects.create(
+            cliente=self.cliente, nombre_cliente="Plano 5",
+            monto_original=Decimal('100000'), tasa_interes_anual=Decimal('12'),
+            tipo_pago='mensual', modo='fixed_payment', pago_mensual=Decimal('1000'),
+            saldo_actual=Decimal('100000'), fecha_inicio=self.hoy - relativedelta(months=5),
+        )
+        prestamo.actualizar_saldo(self.hoy)
+        cargos = list(prestamo.movimientos.filter(tipo='interes_cargo').order_by('fecha'))
+        self.assertEqual(len(cargos), 5)
+        # Cada cargo es exactamente una mensualidad de interés; todos iguales (no crece).
+        for c in cargos:
+            self.assertEqual(c.monto, Decimal('10.00'))
+        # Saldo = principal + 5 * 10 (lineal, no compuesto).
+        self.assertEqual(prestamo.saldo_actual, Decimal('100050.00'))
+
+    def test_pago_mensual_cero_no_cobra_interes(self):
+        """(c) pago_mensual = 0 → cargo 0; el saldo no crece por interés."""
+        prestamo = Prestamo.objects.create(
+            cliente=self.cliente, nombre_cliente="Cero PM",
+            monto_original=Decimal('50000'), tasa_interes_anual=Decimal('15'),
+            tipo_pago='mensual', modo='fixed_payment', pago_mensual=Decimal('0'),
+            saldo_actual=Decimal('50000'), fecha_inicio=self.hoy - relativedelta(months=3),
+        )
+        prestamo.actualizar_saldo(self.hoy)
+        total_cargos = sum((c.monto for c in prestamo.movimientos.filter(tipo='interes_cargo')), Decimal('0'))
+        self.assertEqual(total_cargos, Decimal('0'))
+        self.assertEqual(prestamo.saldo_actual, Decimal('50000.00'))  # sin interés
+
+    def test_pago_mensual_none_no_lanza_y_cobra_cero(self):
+        """(d) pago_mensual = None → cargo 0 sin excepción (regla literal, sin fallback)."""
+        prestamo = Prestamo.objects.create(
+            cliente=self.cliente, nombre_cliente="None PM",
+            monto_original=Decimal('50000'), tasa_interes_anual=Decimal('15'),
+            tipo_pago='mensual', modo='fixed_term', pago_mensual=None, plazo_meses=None,
+            saldo_actual=Decimal('50000'), fecha_inicio=self.hoy - relativedelta(months=3),
+        )
+        prestamo.actualizar_saldo(self.hoy)  # no debe lanzar TypeError
+        total_cargos = sum((c.monto for c in prestamo.movimientos.filter(tipo='interes_cargo')), Decimal('0'))
+        self.assertEqual(total_cargos, Decimal('0'))
+        self.assertEqual(prestamo.saldo_actual, Decimal('50000.00'))
 
 
 class IntegrationSmokeTest(TestCase):
