@@ -32,6 +32,13 @@ class ClienteViewSet(viewsets.ModelViewSet):
     queryset = Cliente.objects.all().order_by('nombre')
     serializer_class = ClienteSerializer
 
+    def get_queryset(self):
+        # Aislamiento por usuario de la PII de clientes.
+        return Cliente.objects.filter(owner=self.request.user).order_by('nombre')
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
     @action(detail=True, methods=['get'])
     def prestamos(self, request, pk=None):
         cliente = self.get_object()

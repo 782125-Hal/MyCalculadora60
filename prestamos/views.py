@@ -9,7 +9,7 @@ from django.utils import timezone
 from django.views import View
 from django.views.generic import DetailView
 
-from .models import Cliente, Prestamo, Movimiento
+from .models import Cliente, Prestamo, Movimiento, registrar_auditoria
 from .forms import (
     CalculatorForm,
     RegistrationForm,
@@ -168,7 +168,7 @@ class CalculadoraView(LoginRequiredMixin, View):
                         tasa = reg_form.cleaned_data['tasa']
                         pago_mensual = reg_form.cleaned_data['pago_mensual']
                         plazo_meses = reg_form.cleaned_data['plazo_meses']
-                        cliente = Cliente.objects.create(nombre=nombre, telefono='N/A')
+                        cliente = Cliente.objects.create(owner=request.user, nombre=nombre, telefono='N/A')
                         prestamo = Prestamo(
                             owner=request.user,
                             cliente=cliente,
@@ -183,6 +183,8 @@ class CalculadoraView(LoginRequiredMixin, View):
                             modo='fixed_term' if tipo_calculo == 'pago' else 'fixed_payment'
                         )
                         prestamo.save()
+                        registrar_auditoria(request.user, 'crear', 'Prestamo', prestamo.pk,
+                                            f"{nombre} · ${monto}")
                         messages.success(request, 'Préstamo registrado exitosamente.')
                         return redirect('prestamos:detalle_prestamo', pk=prestamo.pk)
                 except Exception:
@@ -222,7 +224,7 @@ class RegistrarPrestamoView(LoginRequiredMixin, View):
                     nombre = form.cleaned_data['nombre']
                     telefono = form.cleaned_data['telefono']
                     fecha_inicio = form.cleaned_data['fecha_inicio']
-                    cliente = Cliente.objects.create(nombre=nombre, telefono=telefono)
+                    cliente = Cliente.objects.create(owner=request.user, nombre=nombre, telefono=telefono)
                     prestamo = Prestamo.objects.create(
                         owner=request.user,
                         cliente=cliente,
@@ -236,6 +238,8 @@ class RegistrarPrestamoView(LoginRequiredMixin, View):
                         pago_mensual=form.cleaned_data.get('pago_mensual', Decimal('0')),
                         saldo_actual=form.cleaned_data['monto_original']
                     )
+                    registrar_auditoria(request.user, 'crear', 'Prestamo', prestamo.pk,
+                                        f"{nombre} · ${form.cleaned_data['monto_original']}")
                     messages.success(request, "Préstamo registrado exitosamente.")
                     if 'calculadora_data' in request.session:
                         del request.session['calculadora_data']
@@ -289,6 +293,8 @@ def registrar_pago(request, prestamo_id):
                         descripcion=form.cleaned_data.get('descripcion', 'Pago registrado')
                     )
                     prestamo.actualizar_saldo(form.cleaned_data['fecha'])
+                    registrar_auditoria(request.user, 'pago', 'Prestamo', prestamo.pk,
+                                        f"${form.cleaned_data['monto']} el {form.cleaned_data['fecha']}")
                     messages.success(request, "Pago registrado exitosamente.")
             except Exception:
                 logger.exception("Error al registrar pago (prestamo=%s)", prestamo_id)
@@ -315,6 +321,8 @@ def registrar_incremento(request, prestamo_id):
                         form.cleaned_data['monto'],
                         form.cleaned_data['fecha']
                     )
+                    registrar_auditoria(request.user, 'incremento', 'Prestamo', prestamo.pk,
+                                        f"${form.cleaned_data['monto']} el {form.cleaned_data['fecha']}")
                     messages.success(request, "Incremento de capital registrado exitosamente.")
             except Exception:
                 logger.exception("Error al registrar incremento (prestamo=%s)", prestamo_id)
@@ -343,6 +351,8 @@ def editar_movimiento(request, movimiento_id):
                     movimiento.descripcion = form.cleaned_data.get('descripcion', movimiento.descripcion)
                     movimiento.save()
                     movimiento.prestamo.actualizar_saldo()
+                    registrar_auditoria(request.user, 'editar', 'Movimiento', movimiento.pk,
+                                        f"préstamo #{prestamo_id} · ${form.cleaned_data['monto']}")
                     messages.success(request, "Movimiento editado exitosamente.")
                     return redirect('prestamos:detalle_prestamo', pk=prestamo_id)
             except Exception:
@@ -374,8 +384,10 @@ def borrar_movimiento(request, movimiento_id):
         try:
             with transaction.atomic():
                 prestamo = movimiento.prestamo  # Guardar referencia antes del delete
+                detalle = f"préstamo #{prestamo_id} · {movimiento.tipo} ${movimiento.monto}"
                 movimiento.delete()
                 prestamo.actualizar_saldo()  # Recalcula saldo con referencia segura
+                registrar_auditoria(request.user, 'borrar', 'Movimiento', movimiento_id, detalle)
                 messages.success(request, "Movimiento borrado exitosamente.")
         except Exception:
             logger.exception("Error al borrar movimiento (movimiento=%s)", movimiento_id)
@@ -398,6 +410,8 @@ def editar_prestamo(request, prestamo_id):
                     prestamo.saldo_actual = prestamo.monto_original  # Reset
                     prestamo.save()
                     prestamo.actualizar_saldo()
+                    registrar_auditoria(request.user, 'editar', 'Prestamo', prestamo.pk,
+                                        f"monto ${prestamo.monto_original} · tasa {prestamo.tasa_interes_anual}%")
                     messages.success(request, "Préstamo actualizado exitosamente.")
                     return redirect('prestamos:detalle_prestamo', pk=prestamo_id)
             except Exception:
@@ -418,7 +432,9 @@ def delete_prestamo(request, prestamo_id):
     if request.method == 'POST':
         try:
             with transaction.atomic():
+                detalle = f"{prestamo.nombre_cliente} · ${prestamo.monto_original}"
                 prestamo.delete()  # Deletes loan and related movements due to CASCADE
+                registrar_auditoria(request.user, 'borrar', 'Prestamo', prestamo_id, detalle)
                 messages.success(request, f"El préstamo #{prestamo_id} ha sido eliminado exitosamente.")
                 return redirect('prestamos:lista_prestamos')
         except Exception:
@@ -435,6 +451,8 @@ def crear_prestamo(request):
     """Vista para crear un préstamo desde un formulario simple."""
     if request.method == 'POST':
         form = CrearPrestamoSimpleForm(request.POST)
+        # Solo se pueden elegir clientes propios.
+        form.fields['cliente'].queryset = Cliente.objects.filter(owner=request.user)
         if form.is_valid():
             try:
                 cliente = form.cleaned_data['cliente']
@@ -451,6 +469,8 @@ def crear_prestamo(request):
                         saldo_actual=monto,
                         plazo_meses=form.cleaned_data['periodos_totales'],
                     )
+                    registrar_auditoria(request.user, 'crear', 'Prestamo', prestamo.pk,
+                                        f"{cliente.nombre} · ${monto}")
                     messages.success(request, "Préstamo creado exitosamente.")
                     return redirect('prestamos:detalle_prestamo', pk=prestamo.pk)
             except Exception:
@@ -460,7 +480,7 @@ def crear_prestamo(request):
             for field, errors in form.errors.items():
                 for error in errors:
                     messages.error(request, f"{field}: {error}")
-    clientes = Cliente.objects.all()
+    clientes = Cliente.objects.filter(owner=request.user)
     return render(request, 'prestamos/crear_prestamo.html', {'clientes': clientes})
 
 @login_required
@@ -489,7 +509,7 @@ def registrar_inversion(request):
             fecha_base = form.cleaned_data.get('fecha_inicio_simulacion') or timezone.now().date()
 
             with transaction.atomic():
-                cliente = Cliente.objects.create(nombre="Inversión Automática", telefono="N/A")
+                cliente = Cliente.objects.create(owner=request.user, nombre="Inversión Automática", telefono="N/A")
                 prestamo = Prestamo.objects.create(
                     owner=request.user,
                     cliente=cliente,
@@ -538,6 +558,8 @@ def registrar_inversion(request):
                         descripcion='Inversión inicial'
                     )
 
+                registrar_auditoria(request.user, 'crear', 'Prestamo', prestamo.pk,
+                                    f"Inversión · ${inversion_inicial}")
                 messages.success(request, "Inversión registrada exitosamente con sus movimientos.")
                 return redirect('prestamos:detalle_prestamo', pk=prestamo.pk)
 

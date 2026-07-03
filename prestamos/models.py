@@ -22,6 +22,14 @@ class Cliente(models.Model):
     """
     Modelo para representar a un cliente que solicita un préstamo.
     """
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='clientes',
+        help_text='Usuario propietario. Aísla la PII del cliente entre cuentas.'
+    )
     nombre = models.CharField(max_length=100)
     telefono = models.CharField(max_length=15, blank=True)
 
@@ -188,6 +196,54 @@ class Prestamo(models.Model):
                 descripcion='Incremento de capital solicitado por cliente'
             )
             self.actualizar_saldo(fecha)
+
+class RegistroAuditoria(models.Model):
+    """Bitácora de acciones financieras: quién hizo qué y cuándo.
+
+    Se escribe desde las vistas mediante `registrar_auditoria()`. El objeto
+    afectado se guarda de forma laxa (modelo + id + descripción) para que el
+    registro sobreviva aunque el objeto original se elimine (on_delete=SET_NULL
+    en el usuario, sin FK dura al objeto)."""
+    ACCIONES = [
+        ('crear', 'Crear'),
+        ('editar', 'Editar'),
+        ('borrar', 'Borrar'),
+        ('pago', 'Registrar pago'),
+        ('incremento', 'Registrar incremento'),
+    ]
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='auditorias'
+    )
+    usuario_nombre = models.CharField(max_length=150, blank=True)  # copia por si se borra el user
+    accion = models.CharField(max_length=20, choices=ACCIONES)
+    modelo = models.CharField(max_length=50)          # p.ej. 'Prestamo', 'Movimiento'
+    objeto_id = models.IntegerField(null=True, blank=True)
+    detalle = models.CharField(max_length=255, blank=True)
+    fecha = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha']
+
+    def __str__(self):
+        return f"[{self.fecha:%Y-%m-%d %H:%M}] {self.usuario_nombre} {self.accion} {self.modelo}#{self.objeto_id}"
+
+
+def registrar_auditoria(user, accion, modelo, objeto_id=None, detalle=''):
+    """Crea una entrada de auditoría de forma segura (nunca rompe la vista)."""
+    try:
+        RegistroAuditoria.objects.create(
+            usuario=user if getattr(user, 'is_authenticated', False) else None,
+            usuario_nombre=getattr(user, 'username', '') or '',
+            accion=accion,
+            modelo=modelo,
+            objeto_id=objeto_id,
+            detalle=str(detalle)[:255],
+        )
+    except Exception:  # la auditoría no debe tumbar la operación principal
+        import logging
+        logging.getLogger('prestamos').exception("No se pudo registrar auditoría")
+
 
 class Movimiento(models.Model):
     prestamo = models.ForeignKey(Prestamo, on_delete=models.CASCADE, related_name='movimientos')

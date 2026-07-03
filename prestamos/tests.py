@@ -16,7 +16,7 @@ from datetime import date, timedelta
 from django.test import TestCase
 from django.utils import timezone
 
-from .models import Cliente, Prestamo, Movimiento
+from .models import Cliente, Prestamo, Movimiento, RegistroAuditoria
 from .calculator import (
     calculate_payment_for_term,
     calculate_term_for_payment,
@@ -385,7 +385,7 @@ class HardeningFixesTest(TestCase):
         from django.contrib.auth.models import User
         self.user = User.objects.create_user('operador', password='testpass')
         self.client.login(username='operador', password='testpass')
-        self.cliente = Cliente.objects.create(nombre="Cliente CSV")
+        self.cliente = Cliente.objects.create(owner=self.user, nombre="Cliente CSV")
 
     def test_crear_prestamo_funciona_con_form(self):
         """Regresión: antes la vista leía 'monto_original'/'plazo_periodos' que el
@@ -434,3 +434,102 @@ class HardeningFixesTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn(b"'=HYPERLINK", resp.content)   # neutralizado
         self.assertNotIn(b',=HYPERLINK', resp.content)  # no queda como fórmula activa
+
+
+class ClienteAislamientoTest(TestCase):
+    """Aislamiento de la PII de clientes por usuario (web y API)."""
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+        self.ana = User.objects.create_user('ana', password='x')
+        self.beto = User.objects.create_user('beto', password='x')
+        self.cliente_ana = Cliente.objects.create(owner=self.ana, nombre="Cliente de Ana", telefono="555-1")
+
+    def test_crear_prestamo_no_lista_clientes_ajenos(self):
+        self.client.login(username='beto', password='x')
+        resp = self.client.get('/prestamos/crear-prestamo/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, "Cliente de Ana")  # Beto no ve el cliente de Ana
+
+    def test_no_se_puede_crear_prestamo_con_cliente_ajeno(self):
+        self.client.login(username='beto', password='x')
+        resp = self.client.post('/prestamos/crear-prestamo/', {
+            'cliente': self.cliente_ana.id,   # cliente de Ana
+            'monto': '1000',
+            'tipo_pago': 'mensual',
+            'fecha_inicio': date.today().isoformat(),
+            'tasa_interes_anual': '10',
+            'periodos_totales': '12',
+        })
+        self.assertEqual(resp.status_code, 200)  # rechazado, no redirige
+        self.assertFalse(Prestamo.objects.filter(cliente=self.cliente_ana).exists())
+
+    def test_api_clientes_solo_devuelve_propios(self):
+        Cliente.objects.create(owner=self.beto, nombre="Cliente de Beto")
+        self.client.login(username='beto', password='x')
+        resp = self.client.get('/api/clientes/')
+        self.assertEqual(resp.status_code, 200)
+        nombres = [c['nombre'] for c in resp.json()['results']]
+        self.assertIn("Cliente de Beto", nombres)
+        self.assertNotIn("Cliente de Ana", nombres)
+
+
+class ApiPrestamoAislamientoTest(TestCase):
+    """La API DRF de préstamos respeta el owner."""
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+        self.ana = User.objects.create_user('ana', password='x')
+        self.beto = User.objects.create_user('beto', password='x')
+        self.prestamo_ana = Prestamo.objects.create(
+            owner=self.ana, nombre_cliente="Ana", monto_original=Decimal('1000'),
+            tasa_interes_anual=Decimal('5'), tipo_pago='mensual', modo='fixed_payment',
+            saldo_actual=Decimal('1000'), fecha_inicio=date.today(),
+        )
+
+    def test_lista_api_no_incluye_ajenos(self):
+        self.client.login(username='beto', password='x')
+        resp = self.client.get('/api/prestamos/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['count'], 0)
+
+    def test_detalle_api_ajeno_es_404(self):
+        self.client.login(username='beto', password='x')
+        resp = self.client.get(f'/api/prestamos/{self.prestamo_ana.id}/')
+        self.assertEqual(resp.status_code, 404)
+
+    def test_api_requiere_autenticacion(self):
+        resp = self.client.get('/api/prestamos/')
+        self.assertIn(resp.status_code, (401, 403))
+
+
+class AuditoriaTest(TestCase):
+    """Las acciones financieras dejan rastro en RegistroAuditoria."""
+
+    def setUp(self):
+        from django.contrib.auth.models import User
+        self.user = User.objects.create_user('operador', password='x')
+        self.client.login(username='operador', password='x')
+        self.cliente = Cliente.objects.create(owner=self.user, nombre="Cliente Aud")
+        self.prestamo = Prestamo.objects.create(
+            owner=self.user, cliente=self.cliente, nombre_cliente="Cliente Aud",
+            monto_original=Decimal('10000'), tasa_interes_anual=Decimal('5'),
+            tipo_pago='mensual', modo='fixed_payment', saldo_actual=Decimal('10000'),
+            fecha_inicio=date.today(),
+        )
+
+    def test_registrar_pago_genera_auditoria(self):
+        self.client.post(f'/prestamos/prestamo/{self.prestamo.id}/registrar-pago/', {
+            'monto': '500', 'fecha': date.today().isoformat(), 'descripcion': 'abono',
+        })
+        reg = RegistroAuditoria.objects.filter(accion='pago', objeto_id=self.prestamo.id).first()
+        self.assertIsNotNone(reg)
+        self.assertEqual(reg.usuario, self.user)
+        self.assertEqual(reg.usuario_nombre, 'operador')
+
+    def test_borrar_prestamo_genera_auditoria(self):
+        pid = self.prestamo.id
+        self.client.post(f'/prestamos/prestamo/{pid}/borrar/')
+        self.assertTrue(
+            RegistroAuditoria.objects.filter(accion='borrar', modelo='Prestamo', objeto_id=pid).exists()
+        )

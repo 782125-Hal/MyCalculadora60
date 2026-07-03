@@ -1,10 +1,11 @@
 
 from django.contrib import admin
-from .models import Cliente, Prestamo, Movimiento
+from .models import Cliente, Prestamo, Movimiento, RegistroAuditoria
 
 @admin.register(Cliente)
 class ClienteAdmin(admin.ModelAdmin):
-    list_display = ('nombre', 'telefono')
+    list_display = ('nombre', 'owner', 'telefono')
+    list_filter = ('owner',)
     search_fields = ('nombre', 'telefono')
 
 @admin.register(Prestamo)
@@ -36,3 +37,22 @@ class MovimientoAdmin(admin.ModelAdmin):
     list_filter = ('tipo', 'fecha')
     search_fields = ('prestamo__nombre_cliente', 'descripcion')
     date_hierarchy = 'fecha'  # Para navegación por fechas
+
+
+@admin.register(RegistroAuditoria)
+class RegistroAuditoriaAdmin(admin.ModelAdmin):
+    """Bitácora de solo lectura: no se puede crear/editar/borrar desde el admin."""
+    list_display = ('fecha', 'usuario_nombre', 'accion', 'modelo', 'objeto_id', 'detalle')
+    list_filter = ('accion', 'modelo', 'fecha')
+    search_fields = ('usuario_nombre', 'detalle')
+    date_hierarchy = 'fecha'
+    readonly_fields = ('usuario', 'usuario_nombre', 'accion', 'modelo', 'objeto_id', 'detalle', 'fecha')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
