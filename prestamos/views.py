@@ -58,6 +58,9 @@ def home(request):
 
     # KPIs básicos — préstamos visibles (los propios; todos si es admin)
     prestamos = prestamos_visibles(request.user)
+    # Recalcular saldos de activos ANTES de agregar, para reflejar pagos/intereses al instante.
+    for prestamo in prestamos.filter(activo=True):
+        prestamo.actualizar_saldo(hoy)
     total_original = prestamos.aggregate(total=Sum('monto_original'))['total'] or Decimal('0')
     total_saldo = prestamos.aggregate(total=Sum('saldo_actual'))['total'] or Decimal('0')
     activos = prestamos.filter(activo=True).count()
