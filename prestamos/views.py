@@ -297,7 +297,7 @@ def registrar_pago(request, prestamo_id):
                         tipo='pago',
                         descripcion=form.cleaned_data.get('descripcion', 'Pago registrado')
                     )
-                    prestamo.actualizar_saldo(form.cleaned_data['fecha'])
+                    prestamo.actualizar_saldo(timezone.now().date())
                     registrar_auditoria(request.user, 'pago', 'Prestamo', prestamo.pk,
                                         f"${form.cleaned_data['monto']} el {form.cleaned_data['fecha']}")
                     messages.success(request, "Pago registrado exitosamente.")
