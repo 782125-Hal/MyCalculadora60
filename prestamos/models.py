@@ -11,7 +11,7 @@ actualizar_saldo() es intencionalmente stateful (recalcula y persiste cargos de 
 """
 
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
 from decimal import Decimal
 import datetime  # Import corregido para datetime.date.today
 from dateutil.relativedelta import relativedelta
@@ -95,84 +95,84 @@ class Prestamo(models.Model):
 
         from .calculator import get_period_rate_and_delta
 
-        balance = Decimal(self.monto_original)
-        fecha_periodo_start = self.fecha_inicio
+        with transaction.atomic():
+            # DECISIÓN DE NEGOCIO (re-simulación retroactiva SIN perdones históricos):
+            # se purgan TODOS los cargos de interés autogenerados y se regeneran desde
+            # cero según la regla vigente. La simulación es la única fuente de verdad de
+            # los interes_cargo (por eso ya no hay guarda de "fecha ya cargada"). Todo
+            # período cuyos pagos reales NO cubran la mensualidad genera cargo pleno:
+            # esto incluye meses con pago parcial y los viejos cargos de $1.00, que ya
+            # NO se tratan como perdón.
+            self.movimientos.filter(tipo='interes_cargo').delete()
 
-        delta, tasa_periodo = get_period_rate_and_delta(
-            self.tasa_interes_anual, self.tipo_pago
-        )
+            balance = Decimal(self.monto_original)
+            fecha_periodo_start = self.fecha_inicio
 
-        movimientos = list(self.movimientos.order_by('fecha'))
+            delta, tasa_periodo = get_period_rate_and_delta(
+                self.tasa_interes_anual, self.tipo_pago
+            )
 
-        # Pre-cargar para evitar queries N+1 al decidir si crear cargo
-        fechas_cargo_existentes = set(
-            self.movimientos.filter(tipo='interes_cargo').values_list('fecha', flat=True)
-        )
+            # Movimientos reales tras la purga (pagos e incrementos; ya no hay interes_cargo).
+            movimientos = list(self.movimientos.order_by('fecha'))
 
-        mov_index = 0
-        num_mov = len(movimientos)
+            mov_index = 0
+            num_mov = len(movimientos)
+            pago_minimo = self.pago_mensual or Decimal('0')
 
-        # 1) Avanzar período por período hasta la fecha objetivo
-        while fecha_periodo_start < fecha_actual:
-            fecha_esperada = fecha_periodo_start + delta
-            pago_en_periodo = False
+            # 1) Avanzar período por período hasta la fecha objetivo
+            while fecha_periodo_start < fecha_actual:
+                fecha_esperada = fecha_periodo_start + delta
+                suma_pagos_periodo = Decimal('0')
 
-            # Aplicar movimientos ocurridos en este período
-            while (mov_index < num_mov and
-                   movimientos[mov_index].fecha <= fecha_esperada and
-                   movimientos[mov_index].fecha > fecha_periodo_start):
-                mov = movimientos[mov_index]
-                if mov.tipo == 'pago':
-                    balance -= mov.monto
-                    pago_en_periodo = True
-                elif mov.tipo == 'incremento_capital':
-                    balance += mov.monto
-                elif mov.tipo == 'interes_cargo':
-                    balance += mov.monto
-                mov_index += 1
+                # Aplicar movimientos ocurridos en este período, acumulando pagos
+                while (mov_index < num_mov and
+                       movimientos[mov_index].fecha <= fecha_esperada and
+                       movimientos[mov_index].fecha > fecha_periodo_start):
+                    mov = movimientos[mov_index]
+                    if mov.tipo == 'pago':
+                        balance -= mov.monto
+                        suma_pagos_periodo += mov.monto
+                    elif mov.tipo == 'incremento_capital':
+                        balance += mov.monto
+                    mov_index += 1
 
-            # Cargo automático de interés si el período se completó sin pagos
-            if fecha_esperada <= fecha_actual and not pago_en_periodo:
-                if fecha_esperada not in fechas_cargo_existentes:
-                    # Regla de negocio: interés plano = una mensualidad, sin acumular
-                    # el saldo. pago_mensual None/0 => cargo 0 (regla literal, sin fallback).
-                    intereses = (self.pago_mensual or Decimal('0')) * tasa_periodo
+                # Cargo pleno si los pagos del período no cubren la mensualidad.
+                # pago_minimo 0 (pago_mensual None/0) => suma >= 0 siempre => nunca cobra.
+                if fecha_esperada <= fecha_actual and suma_pagos_periodo < pago_minimo:
+                    intereses = pago_minimo * tasa_periodo
                     balance += intereses
                     Movimiento.objects.create(
                         prestamo=self,
                         fecha=fecha_esperada,
                         monto=intereses,
                         tipo='interes_cargo',
-                        descripcion='Cargo por período no pagado'
+                        descripcion='Cargo por período no cubierto'
                     )
-                    fechas_cargo_existentes.add(fecha_esperada)
 
-            fecha_periodo_start = fecha_esperada
+                fecha_periodo_start = fecha_esperada
 
-        # 2) Aplicar cualquier movimiento restante hasta la fecha actual
-        while mov_index < num_mov and movimientos[mov_index].fecha <= fecha_actual:
-            mov = movimientos[mov_index]
-            if mov.tipo == 'pago':
-                balance -= mov.monto
-            elif mov.tipo == 'incremento_capital':
-                balance += mov.monto
-            elif mov.tipo == 'interes_cargo':
-                balance += mov.monto
-            mov_index += 1
+            # 2) Aplicar cualquier movimiento restante hasta la fecha actual
+            while mov_index < num_mov and movimientos[mov_index].fecha <= fecha_actual:
+                mov = movimientos[mov_index]
+                if mov.tipo == 'pago':
+                    balance -= mov.monto
+                elif mov.tipo == 'incremento_capital':
+                    balance += mov.monto
+                mov_index += 1
 
-        # 3) Persistir estado final
-        self.saldo_actual = max(balance, Decimal('0.00'))
+            # 3) Persistir estado final
+            self.saldo_actual = max(balance, Decimal('0.00'))
 
-        pagos = [
-            mov.fecha for mov in movimientos
-            if mov.tipo == 'pago' and mov.fecha <= fecha_actual
-        ]
-        self.ultimo_pago = max(pagos) if pagos else None
+            pagos = [
+                mov.fecha for mov in movimientos
+                if mov.tipo == 'pago' and mov.fecha <= fecha_actual
+            ]
+            self.ultimo_pago = max(pagos) if pagos else None
 
-        if self.saldo_actual <= Decimal('0.00'):
-            self.activo = False
+            if self.saldo_actual <= Decimal('0.00'):
+                self.activo = False
 
-        super().save()
+            super().save()
         return self.saldo_actual
 
     def get_amortizacion(self):

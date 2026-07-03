@@ -292,6 +292,79 @@ class PrestamoActualizarSaldoTest(TestCase):
         self.assertEqual(prestamo.saldo_actual, Decimal('50000.00'))
 
 
+class PrestamoInteresRetroactivoTest(TestCase):
+    """Regla retroactiva: cobra cargo pleno salvo que la suma de pagos del período
+    cubra la mensualidad. Purga+regenera cargos (idempotente, sin perdones)."""
+
+    def setUp(self):
+        self.cliente = Cliente.objects.create(nombre="Retro Test")
+        self.hoy = timezone.now().date()
+
+    def _prestamo(self, pago_mensual=Decimal('10000'), tasa=Decimal('12'), meses=1):
+        # tasa 12% mensual => tasa_periodo 0.01 => cargo pleno = pago_mensual * 0.01
+        return Prestamo.objects.create(
+            cliente=self.cliente, nombre_cliente="Retro",
+            monto_original=Decimal('100000'), tasa_interes_anual=tasa,
+            tipo_pago='mensual', modo='fixed_payment', pago_mensual=pago_mensual,
+            saldo_actual=Decimal('100000'), fecha_inicio=self.hoy - relativedelta(months=meses),
+        )
+
+    def _pago(self, prestamo, monto, dias_atras=10):
+        Movimiento.objects.create(
+            prestamo=prestamo, fecha=self.hoy - timedelta(days=dias_atras),
+            monto=Decimal(monto), tipo='pago', descripcion='pago test',
+        )
+
+    def test_a_pagos_cubren_mensualidad_sin_cargo(self):
+        """(a) Un pago que iguala la mensualidad → sin cargo."""
+        p = self._prestamo()
+        self._pago(p, '10000')
+        p.actualizar_saldo(self.hoy)
+        self.assertEqual(p.movimientos.filter(tipo='interes_cargo').count(), 0)
+        self.assertEqual(p.saldo_actual, Decimal('90000.00'))  # 100000 - 10000, sin interés
+
+    def test_b_pago_parcial_genera_cargo_pleno(self):
+        """(b) Pago parcial (< mensualidad) → cargo pleno de una mensualidad."""
+        p = self._prestamo()
+        self._pago(p, '3000')  # 3000 < 10000
+        p.actualizar_saldo(self.hoy)
+        cargos = p.movimientos.filter(tipo='interes_cargo')
+        self.assertEqual(cargos.count(), 1)
+        self.assertEqual(cargos.first().monto, Decimal('100.00'))  # 10000 * 0.01, pleno
+        self.assertEqual(p.saldo_actual, Decimal('97100.00'))  # 100000 - 3000 + 100
+
+    def test_c_dos_pagos_que_suman_mensualidad_sin_cargo(self):
+        """(c) Dos pagos en el mismo período que juntos cubren la mensualidad → sin cargo."""
+        p = self._prestamo()
+        self._pago(p, '5000', dias_atras=12)
+        self._pago(p, '5000', dias_atras=8)  # 5000 + 5000 = 10000 >= mensualidad
+        p.actualizar_saldo(self.hoy)
+        self.assertEqual(p.movimientos.filter(tipo='interes_cargo').count(), 0)
+        self.assertEqual(p.saldo_actual, Decimal('90000.00'))
+
+    def test_d_pago_de_un_peso_genera_cargo(self):
+        """(d) $1.00 NO es perdón: pago parcial → cargo pleno."""
+        p = self._prestamo()
+        self._pago(p, '1.00')
+        p.actualizar_saldo(self.hoy)
+        cargos = p.movimientos.filter(tipo='interes_cargo')
+        self.assertEqual(cargos.count(), 1)
+        self.assertEqual(cargos.first().monto, Decimal('100.00'))
+        self.assertEqual(p.saldo_actual, Decimal('100099.00'))  # 100000 - 1 + 100
+
+    def test_f_idempotencia_dos_corridas(self):
+        """(f) Dos corridas seguidas → mismo saldo y sin cargos duplicados (purga+regenera)."""
+        p = self._prestamo(meses=3)  # 3 meses sin pago → 3 cargos plenos
+        saldo_1 = p.actualizar_saldo(self.hoy)
+        count_1 = p.movimientos.filter(tipo='interes_cargo').count()
+        saldo_2 = p.actualizar_saldo(self.hoy)
+        count_2 = p.movimientos.filter(tipo='interes_cargo').count()
+        self.assertEqual(count_1, 3)
+        self.assertEqual(count_2, 3)          # no se duplican
+        self.assertEqual(saldo_1, saldo_2)    # idempotente
+        self.assertEqual(p.saldo_actual, Decimal('100300.00'))  # 100000 + 3 * 100
+
+
 class IntegrationSmokeTest(TestCase):
     """Prueba rápida de que todo el flujo de un préstamo funciona junto."""
 
