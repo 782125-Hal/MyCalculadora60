@@ -5,7 +5,7 @@
   },
   "deploy": {
     "startCommand": "python manage.py cerrar_periodos",
-    "cronSchedule": "0 12 * * *",
+    "cronSchedule": "*/5 * * * *",
     "restartPolicyType": "NEVER",
     "numReplicas": 1
   }
