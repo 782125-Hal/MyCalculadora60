@@ -20,10 +20,16 @@
                     {% endif %}
                     Información general
                 </h5>
-                <div>
+                <div class="d-flex flex-wrap gap-1 justify-content-end">
+                    <button type="button" class="btn btn-sm btn-success" data-bs-toggle="modal" data-bs-target="#modalPago">
+                        💵 {% if prestamo.es_deuda %}Registrar Pago Realizado{% else %}Registrar Pago{% endif %}
+                    </button>
+                    <button type="button" class="btn btn-sm btn-warning" data-bs-toggle="modal" data-bs-target="#modalIncremento">
+                        ➕ Registrar {% if prestamo.es_deuda %}Cargo{% else %}Incremento{% endif %}
+                    </button>
                     <a href="{% url 'prestamos:export_prestamo_csv' pk=prestamo.id %}" class="btn btn-sm btn-outline-success">⬇ CSV</a>
                     <a href="{% url 'prestamos:export_prestamo_pdf' pk=prestamo.id %}" class="btn btn-sm btn-outline-danger">📄 PDF</a>
-                    <a href="{% url 'prestamos:editar_prestamo' prestamo.id %}" class="btn btn-sm btn-outline-primary">Editar Préstamo</a>
+                    <a href="{% url 'prestamos:editar_prestamo' prestamo.id %}" class="btn btn-sm btn-outline-primary">Editar</a>
                 </div>
             </div>
             <p><strong>{% if prestamo.es_deuda %}Acreedor / Vendedor{% else %}Cliente{% endif %}:</strong>
@@ -79,62 +85,92 @@
         </table>
     </div>
 
-    <div class="row">
-        <div class="col-md-6">
-            <h5>{% if prestamo.es_deuda %}Registrar Pago Realizado{% else %}Registrar Pago Recibido{% endif %}</h5>
-            <p class="text-muted small">
+    <!-- Los formularios viven en modales: se abren desde los botones de la tarjeta
+         de arriba, sin obligar a bajar hasta el final de la página. -->
+    <div class="modal fade" id="modalPago" tabindex="-1" aria-labelledby="tituloModalPago" aria-hidden="true">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <form action="{% url 'prestamos:registrar_pago' prestamo.id %}" method="post">
+            {% csrf_token %}
+            <div class="modal-header">
+              <h5 class="modal-title" id="tituloModalPago">
+                {% if prestamo.es_deuda %}Registrar Pago Realizado{% else %}Registrar Pago Recibido{% endif %}
+              </h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted small">
                 {% if prestamo.es_deuda %}
                     Un abono que hiciste al acreedor. Baja tu saldo pendiente.
                 {% else %}
                     Un abono que te hizo el cliente. Baja el saldo que te debe.
                 {% endif %}
-            </p>
-            <form action="{% url 'prestamos:registrar_pago' prestamo.id %}" method="post">
-                {% csrf_token %}
-                <div class="mb-2">
-                    <label for="monto">Monto</label>
-                    <input type="number" step="0.01" min="0.01" name="monto" class="form-control" required>
-                </div>
-                <div class="mb-2">
-                    <label for="fecha">Fecha</label>
-                    <input type="date" name="fecha" class="form-control" value="{{ fecha_actual|date:'Y-m-d' }}">
-                </div>
-                <div class="mb-2">
-                    <label for="descripcion">Descripción</label>
-                    <input type="text" name="descripcion" class="form-control"
-                           placeholder="{% if prestamo.es_deuda %}Mensualidad, enganche, abono a capital…{% else %}Pago{% endif %}">
-                </div>
-                <button type="submit" class="btn btn-success">Registrar Pago</button>
-            </form>
+              </p>
+              <div class="mb-2">
+                <label for="monto_pago" class="form-label">Monto</label>
+                <input type="number" step="0.01" min="0.01" name="monto" id="monto_pago" class="form-control" required autofocus>
+              </div>
+              <div class="mb-2">
+                <label for="fecha_pago" class="form-label">Fecha</label>
+                <input type="date" name="fecha" id="fecha_pago" class="form-control" value="{{ fecha_actual|date:'Y-m-d' }}">
+              </div>
+              <div class="mb-2">
+                <label for="descripcion_pago" class="form-label">Descripción</label>
+                <input type="text" name="descripcion" id="descripcion_pago" class="form-control"
+                       placeholder="{% if prestamo.es_deuda %}Mensualidad, enganche, abono a capital…{% else %}Pago{% endif %}">
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+              <button type="submit" class="btn btn-success">Registrar Pago</button>
+            </div>
+          </form>
         </div>
+      </div>
+    </div>
 
-        <div class="col-md-6">
-            <h5>{% if prestamo.es_deuda %}Registrar Cargo Adicional{% else %}Registrar Incremento{% endif %}</h5>
-            <p class="text-muted small">
+    <div class="modal fade" id="modalIncremento" tabindex="-1" aria-labelledby="tituloModalIncremento" aria-hidden="true">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <form action="{% url 'prestamos:registrar_incremento' prestamo.id %}" method="post">
+            {% csrf_token %}
+            <div class="modal-header">
+              <h5 class="modal-title" id="tituloModalIncremento">
+                {% if prestamo.es_deuda %}Registrar Cargo Adicional{% else %}Registrar Incremento{% endif %}
+              </h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted small">
                 {% if prestamo.es_deuda %}
                     Algo que aumenta lo que debes: una comisión, una refinanciación, un gasto añadido al saldo.
                 {% else %}
                     Dinero adicional que le prestaste al cliente. Sube el saldo que te debe.
                 {% endif %}
-            </p>
-            <form action="{% url 'prestamos:registrar_incremento' prestamo.id %}" method="post">
-                {% csrf_token %}
-                <div class="mb-2">
-                    <label for="monto">Monto</label>
-                    <input type="number" step="0.01" min="0.01" name="monto" class="form-control" required>
-                </div>
-                <div class="mb-2">
-                    <label for="fecha">Fecha</label>
-                    <input type="date" name="fecha" class="form-control" value="{{ fecha_actual|date:'Y-m-d' }}">
-                </div>
-                <div class="mb-2">
-                    <label for="descripcion">Descripción</label>
-                    <input type="text" name="descripcion" class="form-control"
-                           placeholder="{% if prestamo.es_deuda %}Comisión, cargo extra…{% else %}Incremento de capital{% endif %}">
-                </div>
-                <button type="submit" class="btn btn-warning">Registrar {% if prestamo.es_deuda %}Cargo{% else %}Incremento{% endif %}</button>
-            </form>
+              </p>
+              <div class="mb-2">
+                <label for="monto_incremento" class="form-label">Monto</label>
+                <input type="number" step="0.01" min="0.01" name="monto" id="monto_incremento" class="form-control" required>
+              </div>
+              <div class="mb-2">
+                <label for="fecha_incremento" class="form-label">Fecha</label>
+                <input type="date" name="fecha" id="fecha_incremento" class="form-control" value="{{ fecha_actual|date:'Y-m-d' }}">
+              </div>
+              <div class="mb-2">
+                <label for="descripcion_incremento" class="form-label">Descripción</label>
+                <input type="text" name="descripcion" id="descripcion_incremento" class="form-control"
+                       placeholder="{% if prestamo.es_deuda %}Comisión, cargo extra…{% else %}Incremento de capital{% endif %}">
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+              <button type="submit" class="btn btn-warning">
+                Registrar {% if prestamo.es_deuda %}Cargo{% else %}Incremento{% endif %}
+              </button>
+            </div>
+          </form>
         </div>
+      </div>
     </div>
 
     <div class="mt-5">

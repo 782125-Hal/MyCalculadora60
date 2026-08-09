@@ -1375,3 +1375,61 @@ class PortafolioViewTests(TestCase):
         response = self.client.get(reverse('prestamos:portafolio'))
         self.assertEqual(response.status_code, 302)
         self.assertIn('login', response.url)
+
+
+class DetalleAccionesRapidasTests(TestCase):
+    """Botones de pago e incremento en la cabecera del detalle.
+
+    Los formularios viven en modales, no repetidos al final de la página: dos
+    formularios con los mismos `name` en el mismo documento son una fuente de
+    errores silenciosos.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username='botones_tester', password='pw')
+        cls.prestamo = Prestamo.objects.create(
+            owner=cls.user, nombre_cliente='Oscar',
+            monto_original=Decimal('408000'), tasa_interes_anual=Decimal('0'),
+            tipo_pago='semanal', fecha_inicio=date(2025, 4, 3),
+            saldo_actual=Decimal('408000'), modo='fixed_payment',
+            pago_mensual=Decimal('3975'),
+        )
+
+    def setUp(self):
+        self.client.login(username='botones_tester', password='pw')
+
+    def _html(self, prestamo=None):
+        prestamo = prestamo or self.prestamo
+        return self.client.get(
+            reverse('prestamos:detalle_prestamo', args=[prestamo.pk])).content.decode()
+
+    def test_los_botones_abren_los_modales(self):
+        html = self._html()
+        self.assertIn('data-bs-target="#modalPago"', html)
+        self.assertIn('data-bs-target="#modalIncremento"', html)
+        self.assertIn('id="modalPago"', html)
+        self.assertIn('id="modalIncremento"', html)
+
+    def test_no_hay_formularios_duplicados(self):
+        html = self._html()
+        self.assertEqual(
+            html.count(reverse('prestamos:registrar_pago', args=[self.prestamo.pk])), 1)
+        self.assertEqual(
+            html.count(reverse('prestamos:registrar_incremento', args=[self.prestamo.pk])), 1)
+
+    def test_el_pago_sigue_registrandose(self):
+        self.client.post(reverse('prestamos:registrar_pago', args=[self.prestamo.pk]),
+                         {'monto': '3975', 'fecha': '2026-08-09', 'descripcion': 'Pago'})
+        self.assertEqual(self.prestamo.movimientos.filter(tipo='pago').count(), 1)
+
+    def test_una_deuda_usa_su_propio_vocabulario(self):
+        deuda = Prestamo.objects.create(
+            owner=self.user, rol=Prestamo.ROL_DEUDA, nombre_cliente='Banco',
+            concepto='Casa', monto_original=Decimal('100'), tasa_interes_anual=Decimal('0'),
+            tipo_pago='mensual', fecha_inicio=date(2025, 1, 1), saldo_actual=Decimal('100'),
+            modo='fixed_payment', pago_mensual=Decimal('10'),
+        )
+        html = self._html(deuda)
+        self.assertIn('Registrar Pago Realizado', html)
+        self.assertIn('Registrar Cargo Adicional', html)
