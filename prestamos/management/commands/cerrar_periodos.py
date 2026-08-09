@@ -19,6 +19,7 @@ import logging
 from datetime import datetime
 
 from django.core.management.base import BaseCommand, CommandError
+from django.db import connections
 from django.utils import timezone
 
 from prestamos.models import Prestamo
@@ -45,6 +46,15 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        try:
+            self._cerrar(**options)
+        finally:
+            # Railway trata este servicio como cron: si el proceso no termina,
+            # se salta la siguiente ejecución programada. settings usa
+            # conn_max_age=600, así que la conexión a Postgres quedaría abierta.
+            connections.close_all()
+
+    def _cerrar(self, **options):
         if options['hasta']:
             try:
                 hasta = datetime.strptime(options['hasta'], '%Y-%m-%d').date()

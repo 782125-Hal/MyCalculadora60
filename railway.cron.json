@@ -1,0 +1,12 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "python manage.py cerrar_periodos",
+    "cronSchedule": "0 12 * * *",
+    "restartPolicyType": "NEVER",
+    "numReplicas": 1
+  }
+}

@@ -115,6 +115,48 @@ Ver [.env.example](.env.example) para las variables que debes configurar.
 
 El `Procfile` ejecuta las migraciones y levanta el servidor automáticamente en cada deploy.
 
+### Cierre automático de períodos (cron)
+
+Los cargos de interés se generan al recalcular el saldo. Sin un cron, eso sólo
+ocurre cuando alguien abre el dashboard, la lista o el detalle: si nadie entra en
+todo el mes, los cargos no existen hasta la siguiente visita.
+
+El comando `cerrar_periodos` lo hace por fuera. Para automatizarlo en Railway hace
+falta un **segundo servicio** en el mismo proyecto, apuntando a este mismo repo:
+Railway salta las ejecuciones programadas mientras haya un deploy activo, y el
+servicio web corre `uvicorn` de forma permanente, así que el cron nunca dispararía
+si se configurara sobre él.
+
+Configuración del servicio cron:
+
+| Ajuste (Settings del servicio) | Valor |
+|---|---|
+| Config-as-code file path | `/railway.cron.json` |
+| Variables | `DATABASE_URL` y `SECRET_KEY`, referenciadas del mismo Postgres y entorno que el web |
+
+El resto —comando, horario y política de reinicio— vive en
+[`railway.cron.json`](railway.cron.json), versionado junto al código:
+
+```json
+"startCommand": "python manage.py cerrar_periodos",
+"cronSchedule": "0 12 * * *",
+"restartPolicyType": "NEVER"
+```
+
+`0 12 * * *` es 06:00 en `America/Mexico_City` (Railway programa en UTC; México
+no aplica horario de verano desde 2022, así que el desfase es constante).
+Railway no permite intervalos menores a 5 minutos.
+
+El comando es idempotente —`actualizar_saldo()` purga y regenera los cargos— así
+que repetirlo no duplica nada, y cierra la conexión a la base al terminar para que
+el proceso salga y no bloquee la siguiente ejecución.
+
+```bash
+python manage.py cerrar_periodos                  # hasta hoy
+python manage.py cerrar_periodos --hasta 2026-01-01
+python manage.py cerrar_periodos --rol deuda      # sólo deudas propias
+```
+
 ---
 
 ## Stack tecnológico
