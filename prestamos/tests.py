@@ -920,3 +920,99 @@ class DeudaPropiaTests(TestCase):
         self.client.force_login(otro)
         response = self.client.get(reverse('prestamos:detalle_prestamo', args=[self.deuda.id]))
         self.assertEqual(response.status_code, 404)
+
+
+class ListaPaginacionTests(TestCase):
+    """Paginación, filtros y orden en la lista.
+
+    Lo importante no es sólo el corte visual: actualizar_saldo() purga y
+    regenera los cargos de interés de cada préstamo, así que recorrer el
+    queryset entero en un GET significaba cientos de escrituras.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username='pag_tester', password='pw')
+        for i in range(25):
+            Prestamo.objects.create(
+                owner=cls.user,
+                rol=Prestamo.ROL_DEUDA if i % 5 == 0 else Prestamo.ROL_PRESTAMO,
+                nombre_cliente=f'Cliente {i:02d}',
+                telefono=f'555-{i:04d}',
+                monto_original=Decimal('1000') + i,
+                tasa_interes_anual=Decimal('10'),
+                tipo_pago='mensual',
+                fecha_inicio=date(2025, 1, 1),
+                saldo_actual=Decimal('1000') + i,
+                activo=(i % 2 == 0),
+                modo='fixed_payment',
+                pago_mensual=Decimal('100'),
+            )
+
+    def setUp(self):
+        self.client.login(username='pag_tester', password='pw')
+
+    def test_primera_pagina_muestra_20(self):
+        response = self.client.get(reverse('prestamos:lista_prestamos'))
+        self.assertEqual(len(response.context['prestamos']), 20)
+        self.assertEqual(response.context['total'], 25)
+
+    def test_segunda_pagina_muestra_el_resto(self):
+        response = self.client.get(reverse('prestamos:lista_prestamos'), {'page': 2})
+        self.assertEqual(len(response.context['prestamos']), 5)
+
+    def test_solo_se_recalcula_la_pagina_visible(self):
+        """Pedir la página 1 no debe escribir sobre los préstamos de la página 2.
+
+        Se marca un préstamo de la página 2 con un saldo imposible: si la vista
+        recorriera el queryset completo, actualizar_saldo() lo corregiría.
+        """
+        # Con orden=monto_desc la página 1 son los 20 montos mayores; el de
+        # monto 1000 (i=0) cae en la página 2.
+        rezagado = Prestamo.objects.get(monto_original=Decimal('1000'))
+        Prestamo.objects.filter(pk=rezagado.pk).update(saldo_actual=Decimal('99999.99'))
+
+        self.client.get(reverse('prestamos:lista_prestamos'), {'orden': 'monto_desc'})
+
+        rezagado.refresh_from_db()
+        self.assertEqual(rezagado.saldo_actual, Decimal('99999.99'))
+
+        # Y al pedir la página 2 sí se recalcula.
+        self.client.get(reverse('prestamos:lista_prestamos'), {'orden': 'monto_desc', 'page': 2})
+        rezagado.refresh_from_db()
+        self.assertNotEqual(rezagado.saldo_actual, Decimal('99999.99'))
+
+    def test_filtro_estado_activos(self):
+        response = self.client.get(reverse('prestamos:lista_prestamos'), {'estado': 'activos'})
+        self.assertEqual(response.context['total'], 13)  # i par: 0,2,...,24
+
+    def test_filtro_rol_y_estado_combinados(self):
+        response = self.client.get(reverse('prestamos:lista_prestamos'),
+                                   {'rol': 'deuda', 'estado': 'activos'})
+        # i múltiplo de 5 → deudas: 0,5,10,15,20. De esos, activos (par): 0,10,20
+        self.assertEqual(response.context['total'], 3)
+
+    def test_orden_por_monto(self):
+        response = self.client.get(reverse('prestamos:lista_prestamos'), {'orden': 'monto_desc'})
+        montos = [p.monto_original for p in response.context['prestamos']]
+        self.assertEqual(montos, sorted(montos, reverse=True))
+
+    def test_orden_invalido_cae_al_default(self):
+        response = self.client.get(reverse('prestamos:lista_prestamos'), {'orden': '../../etc/passwd'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context['prestamos']), 20)
+
+    def test_pagina_invalida_no_rompe(self):
+        response = self.client.get(reverse('prestamos:lista_prestamos'), {'page': 'abc'})
+        self.assertEqual(response.status_code, 200)
+
+    def test_suma_de_saldos_es_solo_de_la_pagina(self):
+        response = self.client.get(reverse('prestamos:lista_prestamos'))
+        esperado = sum(p.saldo_actual for p in response.context['prestamos'])
+        self.assertEqual(response.context['suma_saldos'], esperado)
+
+    def test_lista_no_muestra_prestamos_ajenos(self):
+        otro = User.objects.create_user(username='otro_pag', password='pw')
+        self.client.force_login(otro)
+        response = self.client.get(reverse('prestamos:lista_prestamos'))
+        self.assertEqual(response.context['total'], 0)

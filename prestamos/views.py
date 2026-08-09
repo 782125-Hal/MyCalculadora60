@@ -2,6 +2,7 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
+from django.core.paginator import Paginator
 from django.db import transaction
 from django.db.models import Q, Sum
 from django.http import HttpResponse
@@ -105,14 +106,37 @@ def home(request):
     }
     return render(request, 'prestamos/home.html', context)
 
+PRESTAMOS_POR_PAGINA = 20
+
+ORDEN_CHOICES = {
+    'fecha_desc': '-fecha_inicio',
+    'fecha_asc': 'fecha_inicio',
+    'nombre': 'nombre_cliente',
+    'monto_desc': '-monto_original',
+    'saldo_desc': '-saldo_actual',
+}
+
+
 @login_required
 def lista_prestamos(request):
-    """Vista para listar todos los préstamos con actualización diaria del saldo (Punto 5)."""
+    """Lista con búsqueda, filtros por tipo y estado, orden y paginación.
+
+    El saldo se recalcula sólo para la página visible. actualizar_saldo() purga
+    y regenera los cargos de interés de cada préstamo, así que recorrer el
+    queryset completo significaba cientos de escrituras por cada GET.
+    """
     q = request.GET.get('q', '').strip()
     rol = request.GET.get('rol', 'todos')
+    estado = request.GET.get('estado', 'todos')
+    orden = request.GET.get('orden', 'fecha_desc')
+
     prestamos = prestamos_visibles(request.user)
     if rol in (Prestamo.ROL_PRESTAMO, Prestamo.ROL_DEUDA):
         prestamos = prestamos.filter(rol=rol)
+    if estado == 'activos':
+        prestamos = prestamos.filter(activo=True)
+    elif estado == 'inactivos':
+        prestamos = prestamos.filter(activo=False)
     if q:
         qs_filter = (
             Q(nombre_cliente__icontains=q) |
@@ -125,18 +149,31 @@ def lista_prestamos(request):
         except (InvalidOperation, TypeError, ValueError):
             pass
         prestamos = prestamos.filter(qs_filter)
+
+    prestamos = prestamos.order_by(ORDEN_CHOICES.get(orden, ORDEN_CHOICES['fecha_desc']))
+
+    paginator = Paginator(prestamos, PRESTAMOS_POR_PAGINA)
+    page = paginator.get_page(request.GET.get('page'))
+
     hoy = timezone.now().date()
-    for prestamo in prestamos:
-        prestamo.actualizar_saldo(hoy)  # Actualiza el saldo considerando pagos e intereses
+    suma_saldos = Decimal('0.00')
+    for prestamo in page.object_list:
+        prestamo.actualizar_saldo(hoy)
+        suma_saldos += prestamo.saldo_actual
 
     titulos = {
         Prestamo.ROL_DEUDA: 'Mis Deudas',
         Prestamo.ROL_PRESTAMO: 'Préstamos Otorgados',
     }
     return render(request, 'prestamos/lista_prestamos.html', {
-        'prestamos': prestamos,
+        'page': page,
+        'prestamos': page.object_list,
         'q': q,
         'rol': rol,
+        'estado': estado,
+        'orden': orden,
+        'total': paginator.count,
+        'suma_saldos': suma_saldos,
         'titulo': titulos.get(rol, 'Préstamos y Deudas'),
         'es_vista_deudas': rol == Prestamo.ROL_DEUDA,
     })

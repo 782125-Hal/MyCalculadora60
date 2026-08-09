@@ -14,8 +14,20 @@
                 <option value="prestamo" {% if rol == 'prestamo' %}selected{% endif %}>Me deben</option>
                 <option value="deuda" {% if rol == 'deuda' %}selected{% endif %}>Yo debo</option>
             </select>
+            <select name="estado" class="form-select" style="max-width: 150px;">
+                <option value="todos" {% if estado == 'todos' %}selected{% endif %}>Todos</option>
+                <option value="activos" {% if estado == 'activos' %}selected{% endif %}>Activos</option>
+                <option value="inactivos" {% if estado == 'inactivos' %}selected{% endif %}>Inactivos</option>
+            </select>
+            <select name="orden" class="form-select" style="max-width: 200px;">
+                <option value="fecha_desc" {% if orden == 'fecha_desc' %}selected{% endif %}>Fecha (recientes)</option>
+                <option value="fecha_asc" {% if orden == 'fecha_asc' %}selected{% endif %}>Fecha (antiguos)</option>
+                <option value="nombre" {% if orden == 'nombre' %}selected{% endif %}>Contraparte (A-Z)</option>
+                <option value="monto_desc" {% if orden == 'monto_desc' %}selected{% endif %}>Monto (mayor)</option>
+                <option value="saldo_desc" {% if orden == 'saldo_desc' %}selected{% endif %}>Saldo (mayor)</option>
+            </select>
             <button type="submit" class="btn btn-outline-primary">Buscar</button>
-            {% if q or rol != 'todos' %}
+            {% if q or rol != 'todos' or estado != 'todos' or orden != 'fecha_desc' %}
                 <a href="{% url 'prestamos:lista_prestamos' %}" class="btn btn-outline-secondary">Limpiar</a>
             {% endif %}
         </form>
@@ -25,6 +37,13 @@
         </a>
         <a href="{% url 'prestamos:export_prestamos_csv' %}" class="btn btn-outline-success">⬇ Exportar CSV</a>
         <a href="{% url 'prestamos:home' %}" class="btn btn-secondary">Regresar al Menú Principal</a>
+
+        {% if total %}
+            <p class="text-muted small mt-3 mb-1">
+                Mostrando {{ page.start_index }}–{{ page.end_index }} de {{ total }}
+                · Saldo en esta página: <strong>${{ suma_saldos|floatformat:2 }}</strong>
+            </p>
+        {% endif %}
 
         {% if prestamos %}
             <div class="table-responsive">
@@ -73,9 +92,35 @@
                     </tbody>
                 </table>
             </div>
+
+            {% if page.paginator.num_pages > 1 %}
+                <nav aria-label="Paginación">
+                    <ul class="pagination pagination-sm justify-content-center">
+                        {% if page.has_previous %}
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{ page.previous_page_number }}&q={{ q }}&rol={{ rol }}&estado={{ estado }}&orden={{ orden }}">«</a>
+                            </li>
+                        {% else %}
+                            <li class="page-item disabled"><span class="page-link">«</span></li>
+                        {% endif %}
+
+                        <li class="page-item disabled">
+                            <span class="page-link">Página {{ page.number }} de {{ page.paginator.num_pages }}</span>
+                        </li>
+
+                        {% if page.has_next %}
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{ page.next_page_number }}&q={{ q }}&rol={{ rol }}&estado={{ estado }}&orden={{ orden }}">»</a>
+                            </li>
+                        {% else %}
+                            <li class="page-item disabled"><span class="page-link">»</span></li>
+                        {% endif %}
+                    </ul>
+                </nav>
+            {% endif %}
         {% else %}
             <p>
-                {% if q or rol != 'todos' %}
+                {% if q or rol != 'todos' or estado != 'todos' %}
                     No se encontraron registros con los filtros aplicados.
                 {% elif es_vista_deudas %}
                     No hay deudas registradas.
