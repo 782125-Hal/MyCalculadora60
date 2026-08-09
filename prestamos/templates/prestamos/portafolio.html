@@ -1,0 +1,142 @@
+{% extends 'base.html' %}
+
+{% block title %}Portafolio de Inversiones{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h2 class="mb-0">Portafolio de Inversiones</h2>
+    <a href="{% url 'prestamos:nueva_inversion' %}" class="btn btn-success btn-sm">Registrar Inversión</a>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-4">
+        <div class="card text-white bg-primary">
+            <div class="card-body">
+                <h6 class="card-subtitle">Total Invertido</h6>
+                <h3 class="card-title">${{ total_invertido|floatformat:2 }}</h3>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card text-white bg-success">
+            <div class="card-body">
+                <h6 class="card-subtitle">Valor Estimado Hoy</h6>
+                <h3 class="card-title">${{ total_valor|floatformat:2 }}</h3>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card text-white bg-info">
+            <div class="card-body">
+                <h6 class="card-subtitle">Rendimiento</h6>
+                <h3 class="card-title">
+                    ${{ rendimiento_total|floatformat:2 }}
+                    <small class="text-white-50">{{ rendimiento_pct }}%</small>
+                </h3>
+            </div>
+        </div>
+    </div>
+</div>
+
+<p class="text-muted small">
+    Valores proyectados al {{ fecha_actual|date:'d M Y' }} a partir de la tasa y el plazo que
+    capturaste. No se consultan CetesDirecto ni Briq — concilia contra tu estado de cuenta.
+</p>
+
+{% if vencidas %}
+    <div class="alert alert-warning py-2">
+        <strong>{{ vencidas|length }}</strong> posición(es) ya vencieron. Revisa si reinvertiste o retiraste.
+    </div>
+{% endif %}
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">Por plataforma</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead><tr><th>Plataforma</th><th class="text-end">Invertido</th><th class="text-end">Valor</th><th class="text-end">Rend.</th></tr></thead>
+                    <tbody>
+                    {% for nombre, r in por_plataforma.items %}
+                        <tr>
+                            <td>{{ nombre }} <span class="text-muted small">({{ r.posiciones }})</span></td>
+                            <td class="text-end">${{ r.invertido|floatformat:2 }}</td>
+                            <td class="text-end">${{ r.valor|floatformat:2 }}</td>
+                            <td class="text-end text-success">${{ r.rendimiento|floatformat:2 }}</td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="4">Sin posiciones registradas.</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">Próximos vencimientos</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead><tr><th>Instrumento</th><th>Vence</th><th class="text-end">Faltan</th></tr></thead>
+                    <tbody>
+                    {% for p in proximos %}
+                        <tr>
+                            <td><a href="{% url 'prestamos:detalle_inversion' pk=p.pk %}">{{ p.nombre }}</a></td>
+                            <td>{{ p.fecha_vencimiento|date:'d M Y' }}</td>
+                            <td class="text-end">{{ p.dias_restantes }} días</td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="3">Nada por vencer.</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<h5 class="mt-4">Posiciones</h5>
+<div class="table-responsive">
+    <table class="table table-striped table-sm align-middle">
+        <thead>
+            <tr>
+                <th>Plataforma</th>
+                <th>Instrumento</th>
+                <th>Tipo</th>
+                <th class="text-end">Invertido</th>
+                <th class="text-end">Valor hoy</th>
+                <th class="text-end">Rendimiento</th>
+                <th>Vence</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for p in posiciones %}
+            <tr>
+                <td>{{ p.get_plataforma_display }}</td>
+                <td>{{ p.nombre }}</td>
+                <td class="small text-muted">{{ p.get_tipo_display }}</td>
+                <td class="text-end">${{ p.monto_invertido|floatformat:2 }}</td>
+                <td class="text-end">${{ p.valor_hoy|floatformat:2 }}</td>
+                <td class="text-end">${{ p.rendimiento_hoy|floatformat:2 }}</td>
+                <td>
+                    {% if p.fecha_vencimiento %}
+                        {{ p.fecha_vencimiento|date:'d M Y' }}
+                        {% if p.vencida %}<span class="badge bg-warning text-dark">Vencida</span>{% endif %}
+                    {% else %}
+                        <span class="text-muted">Sin plazo</span>
+                    {% endif %}
+                </td>
+                <td><a href="{% url 'prestamos:detalle_inversion' pk=p.pk %}" class="btn btn-sm btn-info">Ver</a></td>
+            </tr>
+        {% empty %}
+            <tr><td colspan="8" class="text-center">
+                Aún no registras inversiones.
+                <a href="{% url 'prestamos:nueva_inversion' %}">Registra la primera</a>.
+            </td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

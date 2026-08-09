@@ -1,0 +1,66 @@
+{% extends 'base.html' %}
+
+{% block title %}{{ titulo }}{% endblock %}
+
+{% block content %}
+<h2 class="mb-1">{{ titulo }}</h2>
+<p class="text-muted">
+    Captura la operación tal como la contrataste. Con la tasa y el plazo, la app proyecta
+    sola el valor a cualquier fecha — no hace falta consultar la plataforma.
+</p>
+
+{% if form.non_field_errors %}
+    <div class="alert alert-danger">{{ form.non_field_errors }}</div>
+{% endif %}
+
+<form method="post" novalidate class="row g-3" style="max-width: 760px;">
+    {% csrf_token %}
+    {% for field in form %}
+        {% if field.name == 'tasa_anual' or field.name == 'plazo_dias' or field.name == 'base_dias' %}
+            <div class="col-md-6 campo-proyectable">
+        {% elif field.name == 'valor_manual' %}
+            <div class="col-md-6" id="campo_valor_manual">
+        {% else %}
+            <div class="col-md-6">
+        {% endif %}
+            <label for="{{ field.id_for_label }}" class="form-label">
+                {{ field.label }}{% if field.field.required %} <span class="text-danger">*</span>{% endif %}
+            </label>
+            {{ field }}
+            {% if field.help_text %}<div class="form-text">{{ field.help_text }}</div>{% endif %}
+            {% for error in field.errors %}
+                <div class="invalid-feedback d-block">{{ error }}</div>
+            {% endfor %}
+        </div>
+    {% endfor %}
+
+    <div class="col-12 mt-4">
+        <button type="submit" class="btn btn-success">Guardar</button>
+        <a href="{% url 'prestamos:portafolio' %}" class="btn btn-outline-secondary">Cancelar</a>
+    </div>
+</form>
+
+<script>
+    document.querySelectorAll('form.row input, form.row select, form.row textarea').forEach(function (el) {
+        if (el.type === 'hidden') return;
+        el.classList.add(el.tagName === 'SELECT' ? 'form-select' : 'form-control');
+    });
+
+    // Un fondo no tiene rendimiento proyectable: su valor depende del precio
+    // diario de la acción, así que se captura en vez de calcularse.
+    var tipo = document.querySelector('[name="tipo"]');
+    var proyectables = document.querySelectorAll('.campo-proyectable');
+    var valorManual = document.getElementById('campo_valor_manual');
+
+    function sincronizarTipo() {
+        var esFondo = tipo.value === 'fondo';
+        proyectables.forEach(function (el) { el.style.display = esFondo ? 'none' : ''; });
+        valorManual.querySelector('.form-text').textContent = esFondo
+            ? 'Obligatorio: el valor que muestra hoy tu estado de cuenta.'
+            : 'Opcional. Sólo si quieres forzar un valor distinto al proyectado.';
+    }
+
+    tipo.addEventListener('change', sincronizarTipo);
+    sincronizarTipo();
+</script>
+{% endblock %}

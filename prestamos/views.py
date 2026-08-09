@@ -13,6 +13,7 @@ from django.views.generic import DetailView
 from .models import (
     Cliente, Prestamo, Movimiento, registrar_auditoria,
     prestamos_visibles, movimientos_visibles, clientes_visibles,
+    Inversion, MovimientoInversion, inversiones_visibles,
 )
 from .forms import (
     CalculatorForm,
@@ -24,6 +25,8 @@ from .forms import (
     PrestamoEditForm,
     CrearPrestamoSimpleForm,
     RegistrarInversionForm,
+    InversionForm,
+    MovimientoInversionForm,
 )
 from .calculator import (
     calculate_payment_for_term,
@@ -885,3 +888,174 @@ def export_prestamo_pdf(request, pk):
     response = HttpResponse(buffer, content_type='application/pdf')
     response['Content-Disposition'] = f'attachment; filename="estado_cuenta_prestamo_{pk}.pdf"'
     return response
+
+# ============================================
+# Portafolio de inversiones
+#
+# Ninguna de estas vistas consulta a CetesDirecto ni a Briq: no exponen API y
+# automatizar su login sería frágil y contrario a sus términos. Las posiciones
+# se capturan una vez y su valor se proyecta con prestamos/portafolio.py.
+# ============================================
+
+@login_required
+def portafolio(request):
+    """Dashboard consolidado del portafolio."""
+    hoy = timezone.now().date()
+    posiciones = list(inversiones_visibles(request.user).filter(activa=True))
+
+    total_invertido = Decimal('0.00')
+    total_valor = Decimal('0.00')
+    por_plataforma = {}
+
+    for posicion in posiciones:
+        valor = posicion.valor_estimado(hoy)
+        posicion.valor_hoy = valor
+        posicion.rendimiento_hoy = posicion.rendimiento(hoy)
+        posicion.dias_restantes = posicion.dias_para_vencer(hoy)
+
+        total_invertido += posicion.monto_invertido
+        total_valor += valor
+
+        resumen = por_plataforma.setdefault(posicion.get_plataforma_display(), {
+            'invertido': Decimal('0.00'), 'valor': Decimal('0.00'), 'posiciones': 0,
+        })
+        resumen['invertido'] += posicion.monto_invertido
+        resumen['valor'] += valor
+        resumen['posiciones'] += 1
+
+    for resumen in por_plataforma.values():
+        resumen['rendimiento'] = resumen['valor'] - resumen['invertido']
+
+    rendimiento_total = total_valor - total_invertido
+    rendimiento_pct = (
+        (rendimiento_total / total_invertido * Decimal('100')).quantize(Decimal('0.01'))
+        if total_invertido else Decimal('0.00')
+    )
+
+    # Vencimientos próximos: sólo instrumentos a plazo, los fondos no vencen.
+    proximos = sorted(
+        (p for p in posiciones if p.fecha_vencimiento and not p.vencida),
+        key=lambda p: p.fecha_vencimiento,
+    )[:5]
+    vencidas = [p for p in posiciones if p.vencida]
+
+    return render(request, 'prestamos/portafolio.html', {
+        'posiciones': sorted(posiciones, key=lambda p: p.valor_hoy, reverse=True),
+        'total_invertido': total_invertido,
+        'total_valor': total_valor,
+        'rendimiento_total': rendimiento_total,
+        'rendimiento_pct': rendimiento_pct,
+        'por_plataforma': por_plataforma,
+        'proximos': proximos,
+        'vencidas': vencidas,
+        'fecha_actual': hoy,
+    })
+
+
+@login_required
+def nueva_inversion(request):
+    if request.method != 'POST':
+        return render(request, 'prestamos/inversion_form.html', {
+            'form': InversionForm(), 'titulo': 'Registrar Inversión',
+        })
+
+    form = InversionForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, "Corrija los errores marcados abajo.")
+        return render(request, 'prestamos/inversion_form.html', {
+            'form': form, 'titulo': 'Registrar Inversión',
+        })
+
+    try:
+        with transaction.atomic():
+            inversion = Inversion.objects.create(
+                owner=request.user,
+                plataforma=form.cleaned_data['plataforma'],
+                nombre=form.cleaned_data['nombre'],
+                tipo=form.cleaned_data['tipo'],
+                monto_invertido=form.cleaned_data['monto_invertido'],
+                fecha_compra=form.cleaned_data['fecha_compra'],
+                tasa_anual=form.cleaned_data.get('tasa_anual') or Decimal('0'),
+                plazo_dias=form.cleaned_data.get('plazo_dias') or 0,
+                base_dias=int(form.cleaned_data['base_dias']),
+                valor_manual=form.cleaned_data.get('valor_manual'),
+                notas=form.cleaned_data.get('notas', ''),
+            )
+            registrar_auditoria(request.user, 'crear', 'Inversion', inversion.pk,
+                                f"{inversion.nombre} · ${inversion.monto_invertido}")
+        messages.success(request, "Inversión registrada exitosamente.")
+        return redirect('prestamos:detalle_inversion', pk=inversion.pk)
+    except Exception:
+        logger.exception("Error al registrar inversión (user=%s)", request.user.pk)
+        messages.error(request, "Ocurrió un error al registrar la inversión.")
+        return render(request, 'prestamos/inversion_form.html', {
+            'form': form, 'titulo': 'Registrar Inversión',
+        })
+
+
+@login_required
+def detalle_inversion(request, pk):
+    inversion = get_object_or_404(inversiones_visibles(request.user), pk=pk)
+    hoy = timezone.now().date()
+    return render(request, 'prestamos/detalle_inversion.html', {
+        'inversion': inversion,
+        'valor_hoy': inversion.valor_estimado(hoy),
+        'valor_vencimiento': inversion.valor_al_vencimiento(),
+        'rendimiento_hoy': inversion.rendimiento(hoy),
+        'dias_devengados': inversion.dias_devengados(hoy),
+        'dias_restantes': inversion.dias_para_vencer(hoy),
+        'movimientos': inversion.movimientos.all(),
+        'fecha_actual': hoy,
+    })
+
+
+@login_required
+def registrar_movimiento_inversion(request, pk):
+    inversion = get_object_or_404(inversiones_visibles(request.user), pk=pk)
+    if request.method != 'POST':
+        return redirect('prestamos:detalle_inversion', pk=pk)
+
+    form = MovimientoInversionForm(request.POST)
+    if not form.is_valid():
+        _flash_errores(request, form)
+        return redirect('prestamos:detalle_inversion', pk=pk)
+
+    try:
+        with transaction.atomic():
+            MovimientoInversion.objects.create(
+                inversion=inversion,
+                fecha=form.cleaned_data['fecha'],
+                monto=form.cleaned_data['monto'],
+                tipo=form.cleaned_data['tipo'],
+                descripcion=form.cleaned_data.get('descripcion', ''),
+            )
+            registrar_auditoria(request.user, 'crear', 'MovimientoInversion', inversion.pk,
+                                f"{form.cleaned_data['tipo']} ${form.cleaned_data['monto']}")
+        messages.success(request, "Movimiento registrado exitosamente.")
+    except Exception:
+        logger.exception("Error al registrar movimiento de inversión %s", pk)
+        messages.error(request, "Ocurrió un error al registrar el movimiento.")
+    return redirect('prestamos:detalle_inversion', pk=pk)
+
+
+@login_required
+def borrar_inversion(request, pk):
+    inversion = get_object_or_404(inversiones_visibles(request.user), pk=pk)
+    if request.method != 'POST':
+        return render(request, 'prestamos/confirmar_borrado_inversion.html', {'inversion': inversion})
+    try:
+        with transaction.atomic():
+            nombre = inversion.nombre
+            inversion.delete()
+            registrar_auditoria(request.user, 'borrar', 'Inversion', pk, nombre)
+        messages.success(request, "Inversión eliminada.")
+    except Exception:
+        logger.exception("Error al borrar inversión %s", pk)
+        messages.error(request, "Ocurrió un error al eliminar la inversión.")
+    return redirect('prestamos:portafolio')
+
+
+def _flash_errores(request, form):
+    for campo, errores in form.errors.items():
+        for error in errores:
+            messages.error(request, f"{campo}: {error}")

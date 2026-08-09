@@ -1,0 +1,115 @@
+{% extends 'base.html' %}
+
+{% block title %}{{ inversion.nombre }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <h2 class="mb-0">{{ inversion.nombre }}</h2>
+        <span class="text-muted">{{ inversion.get_plataforma_display }} · {{ inversion.get_tipo_display }}</span>
+    </div>
+    <div>
+        <a href="{% url 'prestamos:portafolio' %}" class="btn btn-sm btn-secondary">Portafolio</a>
+        <a href="{% url 'prestamos:borrar_inversion' pk=inversion.pk %}" class="btn btn-sm btn-outline-danger">Eliminar</a>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-6">
+                <p><strong>Monto invertido:</strong> ${{ inversion.monto_invertido|floatformat:2 }}</p>
+                <p><strong>Fecha de compra:</strong> {{ inversion.fecha_compra|date:'d M Y' }}</p>
+                {% if not inversion.es_fondo %}
+                    <p><strong>Tasa anual:</strong> {{ inversion.tasa_anual }}%</p>
+                    <p><strong>Plazo:</strong> {{ inversion.plazo_dias }} días
+                       <span class="text-muted small">(base {{ inversion.base_dias }})</span></p>
+                {% endif %}
+            </div>
+            <div class="col-md-6">
+                <p><strong>Valor estimado hoy:</strong> ${{ valor_hoy|floatformat:2 }}</p>
+                <p><strong>Rendimiento a hoy:</strong> ${{ rendimiento_hoy|floatformat:2 }}</p>
+                {% if valor_vencimiento %}
+                    <p><strong>Valor al vencimiento:</strong> ${{ valor_vencimiento|floatformat:2 }}</p>
+                    <p><strong>Vence:</strong> {{ inversion.fecha_vencimiento|date:'d M Y' }}
+                        {% if inversion.vencida %}
+                            <span class="badge bg-warning text-dark">Vencida</span>
+                        {% else %}
+                            <span class="text-muted small">(faltan {{ dias_restantes }} días)</span>
+                        {% endif %}
+                    </p>
+                {% endif %}
+                {% if not inversion.es_fondo %}
+                    <p class="text-muted small">{{ dias_devengados }} de {{ inversion.plazo_dias }} días devengados.</p>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if inversion.es_fondo %}
+            <div class="alert alert-info py-2 mb-0">
+                Los fondos no se proyectan: su valor depende del precio diario de la acción.
+                El importe mostrado es el que capturaste.
+            </div>
+        {% elif inversion.valor_manual is not None %}
+            <div class="alert alert-warning py-2 mb-0">
+                Se está mostrando el valor que capturaste a mano, no el proyectado.
+            </div>
+        {% endif %}
+
+        {% if inversion.notas %}<hr><p class="mb-0">{{ inversion.notas }}</p>{% endif %}
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-7">
+        <h5>Movimientos</h5>
+        <table class="table table-sm table-striped">
+            <thead><tr><th>Fecha</th><th>Tipo</th><th class="text-end">Monto</th><th>Descripción</th></tr></thead>
+            <tbody>
+            {% for m in movimientos %}
+                <tr>
+                    <td>{{ m.fecha|date:'d M Y' }}</td>
+                    <td>{{ m.get_tipo_display }}</td>
+                    <td class="text-end">${{ m.monto|floatformat:2 }}</td>
+                    <td class="small text-muted">{{ m.descripcion }}</td>
+                </tr>
+            {% empty %}
+                <tr><td colspan="4" class="text-center">Sin movimientos.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="col-md-5">
+        <h5>Registrar movimiento</h5>
+        <p class="text-muted small">
+            Los rendimientos que ya cobraste salen de la posición a tu bolsillo; sin
+            registrarlos, el rendimiento total quedaría subestimado.
+        </p>
+        <form method="post" action="{% url 'prestamos:registrar_movimiento_inversion' pk=inversion.pk %}">
+            {% csrf_token %}
+            <div class="mb-2">
+                <label for="tipo">Tipo</label>
+                <select name="tipo" class="form-select" required>
+                    <option value="rendimiento">Rendimiento cobrado</option>
+                    <option value="aportacion">Aportación</option>
+                    <option value="retiro">Retiro</option>
+                </select>
+            </div>
+            <div class="mb-2">
+                <label for="monto">Monto</label>
+                <input type="number" step="0.01" min="0.01" name="monto" class="form-control" required>
+            </div>
+            <div class="mb-2">
+                <label for="fecha">Fecha</label>
+                <input type="date" name="fecha" class="form-control" value="{{ fecha_actual|date:'Y-m-d' }}">
+            </div>
+            <div class="mb-2">
+                <label for="descripcion">Descripción</label>
+                <input type="text" name="descripcion" class="form-control" placeholder="Opcional">
+            </div>
+            <button type="submit" class="btn btn-success">Registrar</button>
+        </form>
+    </div>
+</div>
+{% endblock %}

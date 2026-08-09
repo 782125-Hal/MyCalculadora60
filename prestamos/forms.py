@@ -2,7 +2,7 @@ from django import forms
 from decimal import Decimal
 from datetime import date
 
-from .models import Cliente, Prestamo
+from .models import Cliente, Prestamo, Inversion, MovimientoInversion
 
 class CalculatorForm(forms.Form):
     monto = forms.DecimalField(label='Monto del Préstamo', min_value=0)
@@ -264,3 +264,78 @@ class RegistrarInversionForm(forms.Form):
     fecha_inicio_simulacion = forms.DateField(
         label='Fecha de Inicio', required=False, initial=date.today,
     )
+
+
+class InversionForm(forms.Form):
+    """Alta y edición de una posición del portafolio.
+
+    Los campos obligatorios dependen del tipo: un fondo no tiene plazo ni tasa
+    proyectable y necesita valor capturado; los demás necesitan tasa y plazo
+    para poder proyectarse.
+    """
+    plataforma = forms.ChoiceField(label='Plataforma', choices=Inversion.PLATAFORMA_CHOICES)
+    nombre = forms.CharField(
+        label='Instrumento', max_length=200,
+        help_text='Ej: "CETES 28 días" o "Torre Guadalajara".',
+    )
+    tipo = forms.ChoiceField(
+        label='Tipo de instrumento', choices=Inversion.TIPO_CHOICES,
+        help_text='Los fondos no se proyectan: hay que capturar su valor.',
+    )
+    monto_invertido = forms.DecimalField(
+        label='Monto invertido', min_value=Decimal('0.01'),
+        max_digits=15, decimal_places=2,
+        error_messages={'min_value': 'El monto debe ser mayor que cero.'},
+    )
+    fecha_compra = forms.DateField(
+        label='Fecha de compra', initial=date.today,
+        widget=forms.DateInput(attrs={'type': 'date'}, format='%Y-%m-%d'),
+    )
+    tasa_anual = forms.DecimalField(
+        label='Tasa anual (%)', required=False, min_value=Decimal('0'),
+        max_digits=6, decimal_places=3,
+        help_text='La tasa nominal que te dieron al contratar.',
+    )
+    plazo_dias = forms.IntegerField(
+        label='Plazo (días)', required=False, min_value=1,
+        help_text='CETES: 28, 91, 182, 364… Briq: el plazo del proyecto.',
+    )
+    base_dias = forms.ChoiceField(
+        label='Base de cálculo',
+        choices=[(360, '360 días — CETES y mercado de dinero'), (365, '365 días — resto')],
+        initial=360,
+    )
+    valor_manual = forms.DecimalField(
+        label='Valor actual capturado', required=False, min_value=Decimal('0'),
+        max_digits=15, decimal_places=2,
+        help_text='Obligatorio en fondos. En los demás, sólo si quieres forzar un valor.',
+    )
+    notas = forms.CharField(label='Notas', required=False, widget=forms.Textarea(attrs={'rows': 2}))
+
+    def clean(self):
+        cleaned = super().clean()
+        tipo = cleaned.get('tipo')
+
+        if tipo == Inversion.TIPO_FONDO:
+            if cleaned.get('valor_manual') is None:
+                self.add_error('valor_manual',
+                               'Un fondo no se puede proyectar: captura su valor actual.')
+        else:
+            if not cleaned.get('tasa_anual'):
+                self.add_error('tasa_anual', 'Indica la tasa anual para poder proyectar el valor.')
+            if not cleaned.get('plazo_dias'):
+                self.add_error('plazo_dias', 'Indica el plazo en días para poder proyectar el valor.')
+
+        return cleaned
+
+
+class MovimientoInversionForm(forms.Form):
+    """Aportación, retiro o rendimiento cobrado sobre una posición."""
+    tipo = forms.ChoiceField(choices=MovimientoInversion.TIPO_CHOICES)
+    monto = forms.DecimalField(min_value=Decimal('0.01'), max_digits=15, decimal_places=2,
+                               error_messages={'min_value': 'El monto debe ser mayor que cero.'})
+    fecha = forms.DateField(required=False, initial=date.today)
+    descripcion = forms.CharField(max_length=200, required=False)
+
+    def clean_fecha(self):
+        return self.cleaned_data.get('fecha') or date.today()

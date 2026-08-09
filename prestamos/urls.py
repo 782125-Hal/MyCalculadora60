@@ -14,6 +14,11 @@ from .views import (
     crear_prestamo,
     inversiones,
     registrar_inversion,
+    portafolio,
+    nueva_inversion,
+    detalle_inversion,
+    registrar_movimiento_inversion,
+    borrar_inversion,
     export_prestamos_csv,
     export_prestamo_csv,
     export_prestamo_pdf,
@@ -36,6 +41,13 @@ urlpatterns = [
     path('crear-prestamo/', crear_prestamo, name='crear_prestamo'),
     path('inversiones/', inversiones, name='inversiones'),
     path('registrar-inversion/', registrar_inversion, name='registrar_inversion'),
+
+    # Portafolio de inversiones
+    path('portafolio/', portafolio, name='portafolio'),
+    path('portafolio/nueva/', nueva_inversion, name='nueva_inversion'),
+    path('portafolio/<int:pk>/', detalle_inversion, name='detalle_inversion'),
+    path('portafolio/<int:pk>/movimiento/', registrar_movimiento_inversion, name='registrar_movimiento_inversion'),
+    path('portafolio/<int:pk>/borrar/', borrar_inversion, name='borrar_inversion'),
 
     # Exportaciones CSV (Fase 3)
     path('export/prestamos/', export_prestamos_csv, name='export_prestamos_csv'),

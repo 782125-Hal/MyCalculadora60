@@ -88,6 +88,37 @@ con `?rol=deuda` o `?rol=prestamo` en `/prestamos/lista-prestamos/`.
 
 ---
 
+## Portafolio de inversiones
+
+Consolida posiciones de CetesDirecto, Briq.mx u otras plataformas en `/prestamos/portafolio/`.
+
+**No se conecta a ninguna plataforma, y es deliberado.** Ni CetesDirecto —cuyas Reglas
+de Operación sólo contemplan web, apps móviles e IVR— ni Briq.mx exponen API pública.
+Automatizar su login sería frágil (2FA, cambios de maquetado), contrario a sus términos
+y arriesgaría el bloqueo de una cuenta con dinero real.
+
+No hace falta: el rendimiento es determinista desde la compra. Con monto, tasa y plazo
+capturados una vez, el valor a cualquier fecha es aritmética.
+
+| Tipo | Cómo se valúa |
+|---|---|
+| A descuento (CETES, Bondes) | `valor = monto · (1 + r · días / 360)` |
+| Tasa fija a plazo (Briq, pagarés) | Igual, con base 365 |
+| Fondo (BONDDIA, ENERFIN) | **No se proyecta** — depende del precio diario de la acción, se captura |
+
+La base 360 y el devengo salen de la fórmula de Banxico para CETES,
+`P = VN / (1 + r · t / 360)`. Despejada, el monto invertido crece hasta el valor
+nominal exactamente al vencimiento; hay un test que lo comprueba partiendo del
+precio de descuento (`test_el_devengo_reproduce_el_valor_nominal_al_vencimiento`).
+
+Los rendimientos que ya cobraste se registran como movimientos: en Briq salen de la
+posición a tu bolsillo, y sin contarlos el rendimiento total quedaría subestimado.
+Concilia contra tu estado de cuenta; si un valor no cuadra, `valor_manual` lo fuerza.
+
+La aritmética vive en [`prestamos/portafolio.py`](prestamos/portafolio.py), en `Decimal` puro.
+
+---
+
 ## API REST
 
 El browser de la API está disponible en `/api/` cuando el servidor está corriendo.

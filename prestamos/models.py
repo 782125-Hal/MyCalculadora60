@@ -318,3 +318,165 @@ class Movimiento(models.Model):
     def __str__(self):
         return f"{self.tipo.capitalize()} {self.id} - {self.monto} ({self.fecha})"
 
+
+
+class Inversion(models.Model):
+    """
+    Una posición de inversión (CETES, un proyecto de Briq, un fondo…).
+
+    No se conecta a ninguna plataforma: CETES y los instrumentos a tasa fija
+    tienen rendimiento determinista desde la compra, así que con la operación
+    registrada una vez se proyecta su valor a cualquier fecha. Los fondos no
+    son proyectables y guardan su valor capturado a mano.
+
+    La aritmética vive en prestamos/portafolio.py.
+    """
+    PLATAFORMA_CETESDIRECTO = 'cetesdirecto'
+    PLATAFORMA_BRIQ = 'briq'
+    PLATAFORMA_OTRA = 'otra'
+    PLATAFORMA_CHOICES = [
+        (PLATAFORMA_CETESDIRECTO, 'CetesDirecto'),
+        (PLATAFORMA_BRIQ, 'Briq.mx'),
+        (PLATAFORMA_OTRA, 'Otra'),
+    ]
+
+    TIPO_DESCUENTO = 'descuento'
+    TIPO_TASA_FIJA = 'tasa_fija'
+    TIPO_FONDO = 'fondo'
+    TIPO_CHOICES = [
+        (TIPO_DESCUENTO, 'A descuento (CETES, Bondes)'),
+        (TIPO_TASA_FIJA, 'Tasa fija a plazo (Briq, pagarés)'),
+        (TIPO_FONDO, 'Fondo de inversión (BONDDIA, ENERFIN)'),
+    ]
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        null=True, blank=True, related_name='inversiones',
+        help_text='Usuario propietario. Aísla el portafolio entre cuentas.',
+    )
+    plataforma = models.CharField(max_length=20, choices=PLATAFORMA_CHOICES,
+                                  default=PLATAFORMA_CETESDIRECTO)
+    nombre = models.CharField(
+        max_length=200,
+        help_text='Ej: "CETES 28 días" o "Torre Guadalajara".',
+    )
+    tipo = models.CharField(max_length=20, choices=TIPO_CHOICES, default=TIPO_DESCUENTO)
+    monto_invertido = models.DecimalField(max_digits=15, decimal_places=2)
+    fecha_compra = models.DateField(default=datetime.date.today)
+    tasa_anual = models.DecimalField(
+        max_digits=6, decimal_places=3, default=Decimal('0'),
+        help_text='Tasa nominal anual en %. No aplica a fondos.',
+    )
+    plazo_dias = models.IntegerField(
+        default=0, help_text='Días al vencimiento. 0 en fondos (liquidez abierta).',
+    )
+    base_dias = models.IntegerField(
+        default=360,
+        help_text='360 para CETES (convención Banxico); 365 para el resto.',
+    )
+    valor_manual = models.DecimalField(
+        max_digits=15, decimal_places=2, null=True, blank=True,
+        help_text='Valor capturado. Obligatorio en fondos, que no se proyectan.',
+    )
+    activa = models.BooleanField(default=True)
+    notas = models.TextField(blank=True)
+    creada = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-fecha_compra', '-id']
+
+    def __str__(self):
+        return f'{self.get_plataforma_display()} · {self.nombre}'
+
+    @property
+    def es_fondo(self):
+        return self.tipo == self.TIPO_FONDO
+
+    @property
+    def fecha_vencimiento(self):
+        """None en fondos: no vencen."""
+        if self.es_fondo or not self.plazo_dias:
+            return None
+        return self.fecha_compra + datetime.timedelta(days=self.plazo_dias)
+
+    def dias_devengados(self, hasta=None):
+        from .portafolio import dias_transcurridos
+        if self.es_fondo:
+            return 0
+        return dias_transcurridos(self.fecha_compra, hasta or datetime.date.today(),
+                                  self.plazo_dias)
+
+    def valor_estimado(self, hasta=None):
+        """
+        Valor de la posición a `hasta`.
+
+        En fondos devuelve el valor capturado (o el monto invertido si aún no se
+        ha capturado ninguno): proyectarlos sería inventar un precio de mercado.
+        """
+        from .portafolio import valor_devengado
+        if self.es_fondo:
+            return self.valor_manual if self.valor_manual is not None else self.monto_invertido
+        if self.valor_manual is not None:
+            return self.valor_manual
+        return valor_devengado(self.monto_invertido, self.tasa_anual,
+                               self.dias_devengados(hasta), self.base_dias)
+
+    def valor_al_vencimiento(self):
+        from .portafolio import valor_al_vencimiento
+        if self.es_fondo or not self.plazo_dias:
+            return None
+        return valor_al_vencimiento(self.monto_invertido, self.tasa_anual,
+                                    self.plazo_dias, self.base_dias)
+
+    def rendimiento(self, hasta=None):
+        """Ganancia devengada a la fecha, más los rendimientos ya cobrados."""
+        cobrado = sum(
+            (m.monto for m in self.movimientos.all() if m.tipo == MovimientoInversion.TIPO_RENDIMIENTO),
+            Decimal('0.00'),
+        )
+        return self.valor_estimado(hasta) - self.monto_invertido + cobrado
+
+    @property
+    def vencida(self):
+        vencimiento = self.fecha_vencimiento
+        return bool(vencimiento and vencimiento <= datetime.date.today())
+
+    def dias_para_vencer(self, hasta=None):
+        vencimiento = self.fecha_vencimiento
+        if not vencimiento:
+            return None
+        return (vencimiento - (hasta or datetime.date.today())).days
+
+
+class MovimientoInversion(models.Model):
+    """Aportaciones, retiros y rendimientos cobrados de una posición.
+
+    Briq paga rendimientos periódicos que salen de la posición al bolsillo; sin
+    registrarlos, el rendimiento total quedaría subestimado.
+    """
+    TIPO_APORTACION = 'aportacion'
+    TIPO_RETIRO = 'retiro'
+    TIPO_RENDIMIENTO = 'rendimiento'
+    TIPO_CHOICES = [
+        (TIPO_APORTACION, 'Aportación'),
+        (TIPO_RETIRO, 'Retiro'),
+        (TIPO_RENDIMIENTO, 'Rendimiento cobrado'),
+    ]
+
+    inversion = models.ForeignKey(Inversion, on_delete=models.CASCADE, related_name='movimientos')
+    fecha = models.DateField(default=datetime.date.today)
+    monto = models.DecimalField(max_digits=15, decimal_places=2)
+    tipo = models.CharField(max_length=20, choices=TIPO_CHOICES)
+    descripcion = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        ordering = ['fecha', 'id']
+
+    def __str__(self):
+        return f'{self.get_tipo_display()} {self.monto} ({self.fecha})'
+
+
+def inversiones_visibles(user):
+    """Posiciones visibles: las suyas, o todas si es administrador."""
+    qs = Inversion.objects.all()
+    return qs if getattr(user, 'is_superuser', False) else qs.filter(owner=user)

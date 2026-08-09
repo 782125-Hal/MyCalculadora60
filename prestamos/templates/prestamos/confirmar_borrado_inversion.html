@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+
+{% block title %}Eliminar inversión{% endblock %}
+
+{% block content %}
+<h2>Confirmar eliminación</h2>
+<p>
+    ¿Eliminar <strong>{{ inversion.nombre }}</strong> ({{ inversion.get_plataforma_display }}),
+    por ${{ inversion.monto_invertido|floatformat:2 }}?
+</p>
+<p class="text-muted">Se borrarán también sus {{ inversion.movimientos.count }} movimiento(s). No se puede deshacer.</p>
+
+<form method="post">
+    {% csrf_token %}
+    <button type="submit" class="btn btn-danger">Sí, eliminar</button>
+    <a href="{% url 'prestamos:detalle_inversion' pk=inversion.pk %}" class="btn btn-secondary">Cancelar</a>
+</form>
+{% endblock %}

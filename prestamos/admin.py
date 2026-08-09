@@ -1,6 +1,6 @@
 
 from django.contrib import admin
-from .models import Cliente, Prestamo, Movimiento, RegistroAuditoria
+from .models import Cliente, Prestamo, Movimiento, Inversion, MovimientoInversion, RegistroAuditoria
 
 @admin.register(Cliente)
 class ClienteAdmin(admin.ModelAdmin):
@@ -58,3 +58,18 @@ class RegistroAuditoriaAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+@admin.register(Inversion)
+class InversionAdmin(admin.ModelAdmin):
+    list_display = ('nombre', 'plataforma', 'tipo', 'monto_invertido',
+                    'fecha_compra', 'plazo_dias', 'activa', 'owner')
+    list_filter = ('plataforma', 'tipo', 'activa', 'owner')
+    search_fields = ('nombre', 'notas')
+    date_hierarchy = 'fecha_compra'
+
+
+@admin.register(MovimientoInversion)
+class MovimientoInversionAdmin(admin.ModelAdmin):
+    list_display = ('inversion', 'tipo', 'monto', 'fecha', 'descripcion')
+    list_filter = ('tipo', 'fecha')
+    search_fields = ('inversion__nombre', 'descripcion')

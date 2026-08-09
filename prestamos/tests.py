@@ -23,13 +23,23 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from .models import Cliente, Prestamo, Movimiento, RegistroAuditoria
+from .models import (
+    Cliente, Prestamo, Movimiento, RegistroAuditoria,
+    Inversion, MovimientoInversion,
+)
 from .calculator import (
     calculate_payment_for_term,
     calculate_term_for_payment,
     build_amortization_schedule,
     quantize_money,
     quantize_payment,
+)
+from .portafolio import (
+    precio_cete,
+    valor_devengado,
+    rendimiento_esperado,
+    dias_transcurridos,
+    tasa_efectiva_anual,
 )
 
 
@@ -1164,3 +1174,204 @@ class RedondeoDeCuotaTests(TestCase):
         """ROUND_UP es sólo para la cuota; intereses y saldos no cambian."""
         self.assertEqual(quantize_money(Decimal('1.234')), Decimal('1.23'))
         self.assertEqual(quantize_money(Decimal('1.235')), Decimal('1.24'))
+
+
+class PortafolioCalculoTests(TestCase):
+    """Valuación de posiciones. Las cifras se contrastan contra la fórmula de
+    Banxico  P = VN / (1 + r·t/360)  para que el devengo sea consistente con
+    el precio de descuento real de un CETE."""
+
+    def test_precio_cete_formula_banxico(self):
+        # CETE a 28 días con rendimiento 10% anual, valor nominal $10.
+        precio = precio_cete(Decimal('10'), Decimal('10'), 28)
+        esperado = Decimal('10') / (Decimal('1') + Decimal('0.10') * Decimal(28) / Decimal(360))
+        self.assertEqual(precio, esperado.quantize(Decimal('0.0000001')))
+        self.assertLess(precio, Decimal('10'))  # se compra bajo par
+
+    def test_el_devengo_reproduce_el_valor_nominal_al_vencimiento(self):
+        """Invertir el precio de descuento y devengar el plazo completo debe
+        devolver exactamente el valor nominal. Si no, las dos fórmulas no
+        estarían describiendo el mismo instrumento."""
+        precio = precio_cete(Decimal('10'), Decimal('10'), 28)
+        final = valor_devengado(precio, Decimal('10'), 28, 360)
+        self.assertEqual(final, Decimal('10.00'))
+
+    def test_devengo_lineal_a_mitad_de_plazo(self):
+        # $10,000 al 10% anual, base 360: 28 días rinden 10000·0.10·28/360 = 77.78
+        valor = valor_devengado(Decimal('10000'), Decimal('10'), 28, 360)
+        self.assertEqual(valor, Decimal('10077.78'))
+        # A la mitad del plazo, la mitad del rendimiento
+        mitad = valor_devengado(Decimal('10000'), Decimal('10'), 14, 360)
+        self.assertEqual(mitad, Decimal('10038.89'))
+
+    def test_base_365_rinde_menos_que_base_360(self):
+        """Misma tasa y días: la base 360 devenga más por día."""
+        v360 = valor_devengado(Decimal('10000'), Decimal('10'), 30, 360)
+        v365 = valor_devengado(Decimal('10000'), Decimal('10'), 30, 365)
+        self.assertGreater(v360, v365)
+
+    def test_rendimiento_esperado(self):
+        rend = rendimiento_esperado(Decimal('10000'), Decimal('10'), 28, 360)
+        self.assertEqual(rend, Decimal('77.78'))
+
+    def test_tasa_cero_no_devenga(self):
+        self.assertEqual(valor_devengado(Decimal('5000'), Decimal('0'), 90, 360), Decimal('5000.00'))
+
+    def test_dias_se_acotan_al_plazo(self):
+        """Una posición vencida no sigue creciendo indefinidamente."""
+        compra = date(2025, 1, 1)
+        self.assertEqual(dias_transcurridos(compra, date(2025, 1, 15), 28), 14)
+        self.assertEqual(dias_transcurridos(compra, date(2025, 2, 1), 28), 28)
+        self.assertEqual(dias_transcurridos(compra, date(2026, 1, 1), 28), 28)
+
+    def test_fecha_anterior_a_la_compra_no_devenga(self):
+        self.assertEqual(dias_transcurridos(date(2025, 6, 1), date(2025, 1, 1), 28), 0)
+
+    def test_tasa_efectiva_supera_la_nominal_por_reinversion(self):
+        efectiva = tasa_efectiva_anual(Decimal('10'), 28, 360)
+        self.assertGreater(efectiva, Decimal('10'))
+        self.assertLess(efectiva, Decimal('11'))
+
+
+class InversionModelTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username='inv_tester', password='pw')
+        cls.hoy = date(2026, 8, 9)
+
+    def _cete(self, **kw):
+        datos = dict(
+            owner=self.user, plataforma=Inversion.PLATAFORMA_CETESDIRECTO,
+            nombre='CETES 28 días', tipo=Inversion.TIPO_DESCUENTO,
+            monto_invertido=Decimal('10000'), fecha_compra=self.hoy - timedelta(days=14),
+            tasa_anual=Decimal('10'), plazo_dias=28, base_dias=360,
+        )
+        datos.update(kw)
+        return Inversion.objects.create(**datos)
+
+    def test_valor_estimado_devenga_por_dias(self):
+        cete = self._cete()
+        self.assertEqual(cete.valor_estimado(self.hoy), Decimal('10038.89'))
+
+    def test_valor_al_vencimiento(self):
+        self.assertEqual(self._cete().valor_al_vencimiento(), Decimal('10077.78'))
+
+    def test_fecha_vencimiento(self):
+        cete = self._cete()
+        self.assertEqual(cete.fecha_vencimiento, cete.fecha_compra + timedelta(days=28))
+
+    def test_posicion_vencida_no_sigue_creciendo(self):
+        cete = self._cete(fecha_compra=self.hoy - timedelta(days=200))
+        self.assertTrue(cete.vencida)
+        self.assertEqual(cete.valor_estimado(self.hoy), cete.valor_al_vencimiento())
+
+    def test_fondo_usa_valor_capturado_y_no_proyecta(self):
+        fondo = self._cete(tipo=Inversion.TIPO_FONDO, nombre='BONDDIA',
+                           plazo_dias=0, tasa_anual=Decimal('0'),
+                           valor_manual=Decimal('10500'))
+        self.assertTrue(fondo.es_fondo)
+        self.assertIsNone(fondo.fecha_vencimiento)
+        self.assertEqual(fondo.valor_estimado(self.hoy), Decimal('10500'))
+
+    def test_valor_manual_tiene_prioridad_sobre_la_proyeccion(self):
+        cete = self._cete(valor_manual=Decimal('10050'))
+        self.assertEqual(cete.valor_estimado(self.hoy), Decimal('10050'))
+
+    def test_rendimiento_incluye_lo_ya_cobrado(self):
+        """En Briq los rendimientos salen de la posición al bolsillo; sin
+        contarlos, el rendimiento total quedaría subestimado."""
+        briq = self._cete(plataforma=Inversion.PLATAFORMA_BRIQ,
+                          nombre='Torre GDL', tipo=Inversion.TIPO_TASA_FIJA,
+                          base_dias=365)
+        sin_cobros = briq.rendimiento(self.hoy)
+        MovimientoInversion.objects.create(
+            inversion=briq, fecha=self.hoy, monto=Decimal('120'),
+            tipo=MovimientoInversion.TIPO_RENDIMIENTO,
+        )
+        self.assertEqual(briq.rendimiento(self.hoy), sin_cobros + Decimal('120'))
+
+
+class PortafolioViewTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username='port_tester', password='pw')
+
+    def setUp(self):
+        self.client.login(username='port_tester', password='pw')
+
+    def _datos(self, **kw):
+        datos = {
+            'plataforma': 'cetesdirecto', 'nombre': 'CETES 28 días',
+            'tipo': 'descuento', 'monto_invertido': '10000',
+            'fecha_compra': '2026-08-01', 'tasa_anual': '10',
+            'plazo_dias': '28', 'base_dias': '360', 'valor_manual': '', 'notas': '',
+        }
+        datos.update(kw)
+        return datos
+
+    def test_alta_de_posicion(self):
+        response = self.client.post(reverse('prestamos:nueva_inversion'), self._datos())
+        self.assertEqual(response.status_code, 302)
+        inv = Inversion.objects.get(nombre='CETES 28 días')
+        self.assertEqual(inv.owner, self.user)
+        self.assertEqual(inv.base_dias, 360)
+
+    def test_instrumento_a_plazo_exige_tasa_y_plazo(self):
+        response = self.client.post(reverse('prestamos:nueva_inversion'),
+                                    self._datos(tasa_anual='', plazo_dias=''))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('tasa_anual', response.context['form'].errors)
+        self.assertIn('plazo_dias', response.context['form'].errors)
+        self.assertFalse(Inversion.objects.exists())
+
+    def test_fondo_exige_valor_capturado(self):
+        response = self.client.post(reverse('prestamos:nueva_inversion'),
+                                    self._datos(tipo='fondo', tasa_anual='', plazo_dias=''))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('valor_manual', response.context['form'].errors)
+
+    def test_fondo_con_valor_se_registra(self):
+        response = self.client.post(reverse('prestamos:nueva_inversion'), self._datos(
+            tipo='fondo', nombre='BONDDIA', tasa_anual='', plazo_dias='', valor_manual='10500',
+        ))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Inversion.objects.get(nombre='BONDDIA').valor_manual, Decimal('10500'))
+
+    def test_dashboard_consolida_totales(self):
+        self.client.post(reverse('prestamos:nueva_inversion'), self._datos())
+        self.client.post(reverse('prestamos:nueva_inversion'), self._datos(
+            plataforma='briq', nombre='Torre GDL', tipo='tasa_fija',
+            monto_invertido='5000', base_dias='365', plazo_dias='365', tasa_anual='14',
+        ))
+        response = self.client.get(reverse('prestamos:portafolio'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['total_invertido'], Decimal('15000'))
+        self.assertGreater(response.context['total_valor'], Decimal('15000'))
+        self.assertEqual(len(response.context['por_plataforma']), 2)
+
+    def test_dashboard_vacio_no_divide_entre_cero(self):
+        response = self.client.get(reverse('prestamos:portafolio'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['rendimiento_pct'], Decimal('0.00'))
+
+    def test_registrar_rendimiento_cobrado(self):
+        self.client.post(reverse('prestamos:nueva_inversion'), self._datos())
+        inv = Inversion.objects.get(nombre='CETES 28 días')
+        self.client.post(reverse('prestamos:registrar_movimiento_inversion', args=[inv.pk]),
+                         {'tipo': 'rendimiento', 'monto': '77.78', 'fecha': '2026-08-29'})
+        self.assertEqual(inv.movimientos.count(), 1)
+
+    def test_portafolio_ajeno_no_es_visible(self):
+        self.client.post(reverse('prestamos:nueva_inversion'), self._datos())
+        inv = Inversion.objects.get(nombre='CETES 28 días')
+        otro = User.objects.create_user(username='otro_inv', password='pw')
+        self.client.force_login(otro)
+        self.assertEqual(
+            self.client.get(reverse('prestamos:detalle_inversion', args=[inv.pk])).status_code, 404)
+        self.assertEqual(len(self.client.get(reverse('prestamos:portafolio')).context['posiciones']), 0)
+
+    def test_requiere_login(self):
+        self.client.logout()
+        response = self.client.get(reverse('prestamos:portafolio'))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('login', response.url)
