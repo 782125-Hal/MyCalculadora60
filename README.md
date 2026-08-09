@@ -169,10 +169,18 @@ El resto —comando, horario y política de reinicio— vive en
 [`railway.cron.json`](railway.cron.json), versionado junto al código:
 
 ```json
-"startCommand": "python manage.py cerrar_periodos",
+"startCommand": "ALLOWED_HOSTS=mycalculadora60-production.up.railway.app python manage.py cerrar_periodos",
 "cronSchedule": "0 12 * * *",
 "restartPolicyType": "NEVER"
 ```
+
+El `ALLOWED_HOSTS` antepuesto al comando no es decorativo: `settings.py` lo exige
+cuando `DEBUG=False`, y sin él el proceso muere al arrancar con
+`ImproperlyConfigured` —en un cron, silenciosamente—. El comando no atiende HTTP,
+así que el valor sólo satisface esa validación; se usa el dominio real para no
+confundir a quien lea el archivo. Va en el `startCommand` porque `railway.json`
+**no admite un bloque de variables de entorno**, y así queda versionado en lugar
+de vivir sólo en el panel, donde se perdería al recrear el servicio.
 
 `0 12 * * *` es 06:00 en `America/Mexico_City` (Railway programa en UTC; México
 no aplica horario de verano desde 2022, así que el desfase es constante).
