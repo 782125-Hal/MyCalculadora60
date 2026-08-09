@@ -14,7 +14,11 @@ from decimal import Decimal
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 
+from io import StringIO
+
 from django.contrib.auth.models import User
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -1016,3 +1020,75 @@ class ListaPaginacionTests(TestCase):
         self.client.force_login(otro)
         response = self.client.get(reverse('prestamos:lista_prestamos'))
         self.assertEqual(response.context['total'], 0)
+
+
+class CerrarPeriodosCommandTests(TestCase):
+    """Management command para cerrar períodos sin depender de visitas web."""
+
+    def setUp(self):
+        self.hoy = timezone.now().date()
+        self.prestamo = Prestamo.objects.create(
+            nombre_cliente='Deudor',
+            monto_original=Decimal('10000'),
+            tasa_interes_anual=Decimal('12'),
+            tipo_pago='mensual',
+            modo='fixed_payment',
+            pago_mensual=Decimal('1000'),
+            saldo_actual=Decimal('10000'),
+            fecha_inicio=self.hoy - timedelta(days=90),
+        )
+
+    def _run(self, **kwargs):
+        salida = StringIO()
+        call_command('cerrar_periodos', stdout=salida, stderr=StringIO(), **kwargs)
+        return salida.getvalue()
+
+    def test_genera_cargos_sin_visitar_ninguna_pagina(self):
+        self.assertEqual(self.prestamo.movimientos.filter(tipo='interes_cargo').count(), 0)
+        self._run()
+        self.assertGreater(self.prestamo.movimientos.filter(tipo='interes_cargo').count(), 0)
+
+    def test_es_idempotente(self):
+        self._run()
+        cargos_1 = self.prestamo.movimientos.filter(tipo='interes_cargo').count()
+        self.prestamo.refresh_from_db()
+        saldo_1 = self.prestamo.saldo_actual
+
+        self._run()
+        cargos_2 = self.prestamo.movimientos.filter(tipo='interes_cargo').count()
+        self.prestamo.refresh_from_db()
+
+        self.assertEqual(cargos_1, cargos_2)
+        self.assertEqual(saldo_1, self.prestamo.saldo_actual)
+
+    def test_fecha_invalida_es_error_claro(self):
+        with self.assertRaises(CommandError):
+            call_command('cerrar_periodos', hasta='31-12-2025', stdout=StringIO())
+
+    def test_hasta_acota_los_cargos(self):
+        salida = self._run(hasta=(self.hoy - timedelta(days=60)).isoformat())
+        self.assertIn('Revisados 1', salida)
+        cargos_acotado = self.prestamo.movimientos.filter(tipo='interes_cargo').count()
+        self._run()
+        self.assertGreater(
+            self.prestamo.movimientos.filter(tipo='interes_cargo').count(), cargos_acotado
+        )
+
+    def test_filtro_por_rol(self):
+        Prestamo.objects.create(
+            rol=Prestamo.ROL_DEUDA,
+            nombre_cliente='Banco',
+            monto_original=Decimal('5000'),
+            tasa_interes_anual=Decimal('12'),
+            tipo_pago='mensual',
+            modo='fixed_payment',
+            pago_mensual=Decimal('500'),
+            saldo_actual=Decimal('5000'),
+            fecha_inicio=self.hoy - timedelta(days=90),
+        )
+        self.assertIn('Revisados 1', self._run(rol='deuda'))
+        self.assertIn('Revisados 2', self._run())
+
+    def test_omite_inactivos(self):
+        Prestamo.objects.filter(pk=self.prestamo.pk).update(activo=False)
+        self.assertIn('Revisados 0', self._run())
