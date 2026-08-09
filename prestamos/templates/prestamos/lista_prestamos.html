@@ -2,20 +2,27 @@
 
 {% extends 'base.html' %}
 
-{% block title %}Lista de Préstamos{% endblock %}
+{% block title %}{{ titulo }}{% endblock %}
 
 {% block content %}
     <div class="container">
-        <h2 class="mb-4">Lista de Préstamos</h2>
+        <h2 class="mb-4">{{ titulo }}</h2>
         <form method="get" class="mb-3 d-flex align-items-center gap-2 flex-wrap">
-            <input type="text" name="q" class="form-control" style="max-width: 320px;" placeholder="Buscar por cliente, teléfono o monto..." value="{{ request.GET.q|default:'' }}">
+            <input type="text" name="q" class="form-control" style="max-width: 320px;" placeholder="Buscar por cliente, concepto, teléfono o monto..." value="{{ q|default:'' }}">
+            <select name="rol" class="form-select" style="max-width: 180px;">
+                <option value="todos" {% if rol == 'todos' %}selected{% endif %}>Todos</option>
+                <option value="prestamo" {% if rol == 'prestamo' %}selected{% endif %}>Me deben</option>
+                <option value="deuda" {% if rol == 'deuda' %}selected{% endif %}>Yo debo</option>
+            </select>
             <button type="submit" class="btn btn-outline-primary">Buscar</button>
-            {% if request.GET.q %}
+            {% if q or rol != 'todos' %}
                 <a href="{% url 'prestamos:lista_prestamos' %}" class="btn btn-outline-secondary">Limpiar</a>
             {% endif %}
         </form>
 
-        <a href="{% url 'prestamos:registrar_prestamo' %}" class="btn btn-success">Agregar Nuevo Préstamo</a>
+        <a href="{% url 'prestamos:registrar_prestamo' %}?rol={% if es_vista_deudas %}deuda{% else %}prestamo{% endif %}" class="btn btn-success">
+            {% if es_vista_deudas %}Agregar Nueva Deuda{% else %}Agregar Nuevo Préstamo{% endif %}
+        </a>
         <a href="{% url 'prestamos:export_prestamos_csv' %}" class="btn btn-outline-success">⬇ Exportar CSV</a>
         <a href="{% url 'prestamos:home' %}" class="btn btn-secondary">Regresar al Menú Principal</a>
 
@@ -25,7 +32,9 @@
                     <thead>
                     <tr>
                         <th>ID</th>
-                        <th>Cliente</th>
+                        <th>Tipo</th>
+                        <th>Contraparte</th>
+                        <th>Concepto</th>
                         <th>Monto</th>
                         <th>Tipo de Pago</th>
                         <th>Fecha Inicio</th>
@@ -39,7 +48,15 @@
                     {% for prestamo in prestamos %}
                         <tr>
                             <td>{{ prestamo.id }}</td>
+                            <td>
+                                {% if prestamo.es_deuda %}
+                                    <span class="badge bg-danger">Yo debo</span>
+                                {% else %}
+                                    <span class="badge bg-primary">Me deben</span>
+                                {% endif %}
+                            </td>
                             <td>{{ prestamo.nombre_cliente }}</td>
+                            <td class="text-muted small">{{ prestamo.concepto|default:"—" }}</td>
                             <td>{{ prestamo.monto_original }} MXN</td>
                             <td>{{ prestamo.tipo_pago }}</td>
                             <td>{{ prestamo.fecha_inicio }}</td>
@@ -57,7 +74,15 @@
                 </table>
             </div>
         {% else %}
-            <p>No hay préstamos registrados.</p>
+            <p>
+                {% if q or rol != 'todos' %}
+                    No se encontraron registros con los filtros aplicados.
+                {% elif es_vista_deudas %}
+                    No hay deudas registradas.
+                {% else %}
+                    No hay préstamos registrados.
+                {% endif %}
+            </p>
         {% endif %}
     </div>
 {% endblock %}

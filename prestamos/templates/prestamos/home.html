@@ -5,12 +5,13 @@
 {% block content %}
 <h1 class="mb-4">Dashboard</h1>
 
-<!-- KPIs -->
+<!-- KPIs: lo que me deben y lo que debo son magnitudes opuestas, van separadas -->
+<h6 class="text-muted text-uppercase small">Me deben</h6>
 <div class="row mb-4">
     <div class="col-md-3">
         <div class="card text-white bg-primary">
             <div class="card-body">
-                <h6 class="card-subtitle">Total Original</h6>
+                <h6 class="card-subtitle">Total Prestado</h6>
                 <h3 class="card-title">${{ total_original|floatformat:2 }}</h3>
             </div>
         </div>
@@ -18,7 +19,7 @@
     <div class="col-md-3">
         <div class="card text-white bg-success">
             <div class="card-body">
-                <h6 class="card-subtitle">Saldo Actual Total</h6>
+                <h6 class="card-subtitle">Saldo por Cobrar</h6>
                 <h3 class="card-title">${{ total_saldo|floatformat:2 }}</h3>
             </div>
         </div>
@@ -41,12 +42,42 @@
     </div>
 </div>
 
+<h6 class="text-muted text-uppercase small">Yo debo</h6>
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card text-white bg-danger">
+            <div class="card-body">
+                <h6 class="card-subtitle">Total Adquirido</h6>
+                <h3 class="card-title">${{ total_deuda_original|floatformat:2 }}</h3>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-white" style="background-color: #8b1a1a;">
+            <div class="card-body">
+                <h6 class="card-subtitle">Saldo por Pagar</h6>
+                <h3 class="card-title">${{ total_deuda_saldo|floatformat:2 }}</h3>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-white bg-warning">
+            <div class="card-body">
+                <h6 class="card-subtitle">Deudas Activas</h6>
+                <h3 class="card-title">{{ deudas_activas }} <small class="text-white-50">/ {{ total_deudas }}</small></h3>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Accesos rápidos -->
 <h5 class="mt-4">Accesos Rápidos</h5>
 <div class="d-grid gap-2 d-md-flex mb-4">
     <a href="{% url 'prestamos:calculadora_financiera' %}" class="btn btn-primary">🧮 Calculadora Financiera</a>
-    <a href="{% url 'prestamos:registrar_prestamo' %}" class="btn btn-success">➕ Registrar Préstamo</a>
-    <a href="{% url 'prestamos:lista_prestamos' %}" class="btn btn-outline-secondary">📋 Ver Todos los Préstamos</a>
+    <a href="{% url 'prestamos:registrar_prestamo' %}?rol=prestamo" class="btn btn-success">➕ Registrar Préstamo</a>
+    <a href="{% url 'prestamos:registrar_prestamo' %}?rol=deuda" class="btn btn-danger">🏠 Registrar Deuda</a>
+    <a href="{% url 'prestamos:lista_prestamos' %}?rol=prestamo" class="btn btn-outline-secondary">📋 Préstamos</a>
+    <a href="{% url 'prestamos:lista_prestamos' %}?rol=deuda" class="btn btn-outline-danger">💸 Mis Deudas</a>
     <a href="{% url 'prestamos:inversiones' %}" class="btn btn-info">📈 Calculadora de Inversiones</a>
 </div>
 
@@ -77,6 +108,31 @@
         </div>
     </div>
 
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">Deudas con mayor saldo pendiente</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead><tr><th>Concepto</th><th>Acreedor</th><th>Saldo</th><th>Acción</th></tr></thead>
+                    <tbody>
+                    {% for d in top_deudas %}
+                    <tr>
+                        <td>{{ d.concepto|default:"—" }}</td>
+                        <td>{{ d.nombre_cliente }}</td>
+                        <td>${{ d.saldo_actual|floatformat:2 }}</td>
+                        <td><a href="{% url 'prestamos:detalle_prestamo' pk=d.pk %}" class="btn btn-sm btn-outline-primary">Ver</a></td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="4">No hay deudas activas.</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
     <div class="col-md-6">
         <div class="card mb-3">
             <div class="card-header">Actividad reciente (últimos 7 días)</div>

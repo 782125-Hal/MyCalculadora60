@@ -14,7 +14,9 @@ from decimal import Decimal
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 
+from django.contrib.auth.models import User
 from django.test import TestCase
+from django.urls import reverse
 from django.utils import timezone
 
 from .models import Cliente, Prestamo, Movimiento, RegistroAuditoria
@@ -479,7 +481,9 @@ class Fase3ExportsAndDashboardTest(TestCase):
         response = self.client.get('/')
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'Dashboard')
-        self.assertContains(response, 'Total Original')
+        # KPIs separados por rol: "Total Original" se dividió en prestado / adquirido.
+        self.assertContains(response, 'Total Prestado')
+        self.assertContains(response, 'Total Adquirido')
 
     def test_export_csv_requires_login(self):
         response = self.client.get('/prestamos/export/prestamos/')
@@ -708,3 +712,211 @@ class AuditoriaTest(TestCase):
         self.assertTrue(
             RegistroAuditoria.objects.filter(accion='borrar', modelo='Prestamo', objeto_id=pid).exists()
         )
+
+
+class RegistrarPrestamoViewTests(TestCase):
+    """Alta manual de préstamos y deudas propias."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username='alta_tester', password='pw')
+
+    def setUp(self):
+        self.client.login(username='alta_tester', password='pw')
+
+    def _datos(self, **overrides):
+        datos = {
+            'rol': 'prestamo',
+            'concepto': '',
+            'nombre': 'Juan Pérez',
+            'telefono': '555-1234',
+            'monto_original': '100000',
+            'tasa_interes_anual': '12',
+            'tipo_pago': 'mensual',
+            'fecha_inicio': '2025-01-01',
+            'modo': 'fixed_term',
+            'plazo_meses': '24',
+            'pago_mensual': '',
+        }
+        datos.update(overrides)
+        return datos
+
+    def test_alta_plazo_fijo_calcula_el_pago(self):
+        """En modo Plazo Fijo la cuota se deriva. Antes quedaba en None, y como
+        actualizar_saldo() cobra pago_mensual x tasa, el préstamo nunca generaba
+        intereses."""
+        response = self.client.post(reverse('prestamos:registrar_prestamo'), self._datos())
+        self.assertEqual(response.status_code, 302)
+        prestamo = Prestamo.objects.get(nombre_cliente='Juan Pérez')
+        self.assertEqual(prestamo.plazo_meses, 24)
+        self.assertEqual(
+            prestamo.pago_mensual,
+            calculate_payment_for_term(Decimal('100000'), Decimal('12'), 24, 'mensual'),
+        )
+
+    def test_alta_pago_fijo_calcula_el_plazo(self):
+        response = self.client.post(reverse('prestamos:registrar_prestamo'), self._datos(
+            modo='fixed_payment', plazo_meses='', pago_mensual='4707.35',
+        ))
+        self.assertEqual(response.status_code, 302)
+        prestamo = Prestamo.objects.get(nombre_cliente='Juan Pérez')
+        self.assertEqual(prestamo.pago_mensual, Decimal('4707.35'))
+        self.assertEqual(prestamo.plazo_meses, 24)
+
+    def test_pago_fijo_que_no_cubre_intereses_se_registra_sin_plazo(self):
+        """calculate_term_for_payment lanza ValueError; no debe romper el alta."""
+        response = self.client.post(reverse('prestamos:registrar_prestamo'), self._datos(
+            modo='fixed_payment', plazo_meses='', pago_mensual='1',
+        ))
+        self.assertEqual(response.status_code, 302)
+        prestamo = Prestamo.objects.get(nombre_cliente='Juan Pérez')
+        self.assertIsNone(prestamo.plazo_meses)
+
+    def test_plazo_fijo_sin_plazo_no_registra(self):
+        response = self.client.post(reverse('prestamos:registrar_prestamo'),
+                                    self._datos(plazo_meses=''))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Prestamo.objects.filter(nombre_cliente='Juan Pérez').exists())
+        self.assertIn('plazo_meses', response.context['form'].errors)
+
+    def test_pago_fijo_con_cero_no_registra(self):
+        """El 0 que antes venía prellenado no es un pago válido."""
+        response = self.client.post(reverse('prestamos:registrar_prestamo'), self._datos(
+            modo='fixed_payment', plazo_meses='', pago_mensual='0',
+        ))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Prestamo.objects.filter(nombre_cliente='Juan Pérez').exists())
+        self.assertIn('pago_mensual', response.context['form'].errors)
+
+    def test_formulario_nuevo_no_prellena_pago_con_cero(self):
+        response = self.client.get(reverse('prestamos:registrar_prestamo'))
+        self.assertFalse(response.context['form'].initial.get('pago_mensual'))
+
+    def test_rol_llega_desde_el_query_string(self):
+        response = self.client.get(reverse('prestamos:registrar_prestamo'), {'rol': 'deuda'})
+        self.assertEqual(response.context['form'].initial['rol'], 'deuda')
+
+    def test_alta_asigna_owner(self):
+        self.client.post(reverse('prestamos:registrar_prestamo'), self._datos())
+        prestamo = Prestamo.objects.get(nombre_cliente='Juan Pérez')
+        self.assertEqual(prestamo.owner, self.user)
+
+    def test_alta_de_deuda_propia(self):
+        response = self.client.post(reverse('prestamos:registrar_prestamo'), self._datos(
+            rol='deuda', concepto='Terreno en Misiones', nombre='Inmobiliaria del Sur',
+        ))
+        self.assertEqual(response.status_code, 302)
+        deuda = Prestamo.objects.get(concepto='Terreno en Misiones')
+        self.assertTrue(deuda.es_deuda)
+        self.assertEqual(deuda.rol, Prestamo.ROL_DEUDA)
+        self.assertEqual(deuda.saldo_actual, Decimal('100000'))
+
+
+class CalculadoraPrellenadoTests(TestCase):
+    """La calculadora debe dejar sus resultados listos para el alta."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username='calc_tester', password='pw')
+
+    def setUp(self):
+        self.client.login(username='calc_tester', password='pw')
+
+    def test_calculo_deja_datos_en_sesion(self):
+        self.client.post(reverse('prestamos:calculadora_financiera'), {
+            'monto': '100000', 'tasa': '12', 'tipo_calculo': 'pago', 'plazo_meses': '24',
+        })
+        datos = self.client.session['calculadora_data']
+        self.assertEqual(datos['plazo_meses'], 24)
+        self.assertEqual(datos['modo'], 'fixed_term')
+
+    def test_registro_llega_prellenado_tras_calcular(self):
+        self.client.post(reverse('prestamos:calculadora_financiera'), {
+            'monto': '100000', 'tasa': '12', 'tipo_calculo': 'pago', 'plazo_meses': '24',
+        })
+        response = self.client.get(reverse('prestamos:registrar_prestamo'))
+        self.assertTrue(response.context['viene_de_calculadora'])
+        self.assertEqual(response.context['form'].initial['plazo_meses'], 24)
+
+
+class DeudaPropiaTests(TestCase):
+    """Registro de pagos sobre una deuda propia (casa, terreno)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username='deuda_tester', password='pw')
+        cls.deuda = Prestamo.objects.create(
+            owner=cls.user,
+            rol=Prestamo.ROL_DEUDA,
+            concepto='Casa en Cuernavaca',
+            nombre_cliente='Banco Hipotecario',
+            monto_original=Decimal('500000'),
+            tasa_interes_anual=Decimal('0'),
+            tipo_pago='mensual',
+            fecha_inicio=date(2025, 1, 1),
+            saldo_actual=Decimal('500000'),
+            modo='fixed_payment',
+            pago_mensual=Decimal('10000'),
+        )
+
+    def setUp(self):
+        self.client.login(username='deuda_tester', password='pw')
+
+    def test_pago_reduce_el_saldo_de_la_deuda(self):
+        self.client.post(
+            reverse('prestamos:registrar_pago', args=[self.deuda.id]),
+            {'monto': '10000', 'fecha': '2025-02-01', 'descripcion': 'Mensualidad febrero'},
+        )
+        self.deuda.refresh_from_db()
+        self.assertEqual(self.deuda.saldo_actual, Decimal('490000.00'))
+        self.assertEqual(self.deuda.movimientos.filter(tipo='pago').count(), 1)
+
+    def test_cargo_adicional_conserva_la_descripcion(self):
+        self.client.post(
+            reverse('prestamos:registrar_incremento', args=[self.deuda.id]),
+            {'monto': '5000', 'fecha': '2025-02-01', 'descripcion': 'Comisión por apertura'},
+        )
+        movimiento = self.deuda.movimientos.get(tipo='incremento_capital')
+        self.assertEqual(movimiento.descripcion, 'Comisión por apertura')
+
+    def test_detalle_suma_lo_pagado(self):
+        for fecha in ('2025-02-01', '2025-03-01'):
+            self.client.post(reverse('prestamos:registrar_pago', args=[self.deuda.id]),
+                             {'monto': '10000', 'fecha': fecha})
+        response = self.client.get(reverse('prestamos:detalle_prestamo', args=[self.deuda.id]))
+        self.assertEqual(response.context['total_pagado'], Decimal('20000.00'))
+
+    def test_filtro_por_rol_separa_deudas_de_prestamos(self):
+        Prestamo.objects.create(
+            owner=self.user,
+            nombre_cliente='Cliente que me debe',
+            monto_original=Decimal('1000'), tasa_interes_anual=Decimal('10'),
+            tipo_pago='mensual', fecha_inicio=date(2025, 1, 1), saldo_actual=Decimal('1000'),
+        )
+        deudas = self.client.get(reverse('prestamos:lista_prestamos'), {'rol': 'deuda'})
+        prestamos = self.client.get(reverse('prestamos:lista_prestamos'), {'rol': 'prestamo'})
+        self.assertEqual(len(deudas.context['prestamos']), 1)
+        self.assertEqual(len(prestamos.context['prestamos']), 1)
+        self.assertTrue(deudas.context['es_vista_deudas'])
+
+    def test_busqueda_por_concepto(self):
+        response = self.client.get(reverse('prestamos:lista_prestamos'), {'q': 'Cuernavaca'})
+        self.assertEqual(len(response.context['prestamos']), 1)
+
+    def test_dashboard_separa_lo_que_debo_de_lo_que_me_deben(self):
+        Prestamo.objects.create(
+            owner=self.user,
+            nombre_cliente='Cliente que me debe',
+            monto_original=Decimal('1000'), tasa_interes_anual=Decimal('0'),
+            tipo_pago='mensual', fecha_inicio=date(2025, 1, 1), saldo_actual=Decimal('1000'),
+        )
+        response = self.client.get(reverse('prestamos:home'))
+        self.assertEqual(response.context['total_original'], Decimal('1000'))
+        self.assertEqual(response.context['total_deuda_original'], Decimal('500000'))
+
+    def test_deuda_ajena_no_es_visible(self):
+        """El aislamiento por owner también aplica a las deudas."""
+        otro = User.objects.create_user(username='ajeno', password='pw')
+        self.client.force_login(otro)
+        response = self.client.get(reverse('prestamos:detalle_prestamo', args=[self.deuda.id]))
+        self.assertEqual(response.status_code, 404)

@@ -24,7 +24,7 @@ class PrestamoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Prestamo
         fields = [
-            'id', 'cliente', 'nombre_cliente', 'telefono',
+            'id', 'rol', 'concepto', 'cliente', 'nombre_cliente', 'telefono',
             'monto_original', 'tasa_interes_anual', 'tipo_pago',
             'fecha_inicio', 'saldo_actual', 'pago_mensual',
             'plazo_meses', 'activo', 'ultimo_pago', 'modo',
@@ -41,7 +41,7 @@ class PrestamoListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Prestamo
         fields = [
-            'id', 'nombre_cliente', 'telefono', 'monto_original',
+            'id', 'rol', 'concepto', 'nombre_cliente', 'telefono', 'monto_original',
             'tasa_interes_anual', 'tipo_pago', 'fecha_inicio',
             'saldo_actual', 'activo', 'modo',
         ]

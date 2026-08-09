@@ -37,7 +37,10 @@
                             <a class="nav-link" href="{% url 'prestamos:calculadora_financiera' %}">Calculadora</a>
                         </li>
                         <li class="nav-item">
-                            <a class="nav-link" href="{% url 'prestamos:lista_prestamos' %}">Préstamos</a>
+                            <a class="nav-link" href="{% url 'prestamos:lista_prestamos' %}?rol=prestamo">Préstamos</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="{% url 'prestamos:lista_prestamos' %}?rol=deuda">Mis Deudas</a>
                         </li>
                         <li class="nav-item">
                             <a class="nav-link" href="{% url 'prestamos:registrar_prestamo' %}">Registrar</a>

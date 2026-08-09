@@ -3,7 +3,7 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.http import HttpResponse
 from django.utils import timezone
 from django.views import View
@@ -52,23 +52,33 @@ def _csv_safe(value):
 @login_required
 def home(request):
     """Dashboard principal con KPIs y accesos rápidos."""
-    from django.db.models import Sum
-
     hoy = timezone.now().date()
 
-    # KPIs básicos — préstamos visibles (los propios; todos si es admin)
-    prestamos = prestamos_visibles(request.user)
+    # KPIs básicos — registros visibles (los propios; todos si es admin)
+    visibles = prestamos_visibles(request.user)
     # Recalcular saldos de activos ANTES de agregar, para reflejar pagos/intereses al instante.
-    for prestamo in prestamos.filter(activo=True):
+    for prestamo in visibles.filter(activo=True):
         prestamo.actualizar_saldo(hoy)
+
+    # Lo que me deben y lo que debo son magnitudes opuestas: sumarlas en un
+    # mismo total no significaría nada, así que van por separado.
+    prestamos = visibles.filter(rol=Prestamo.ROL_PRESTAMO)
+    deudas = visibles.filter(rol=Prestamo.ROL_DEUDA)
+
     total_original = prestamos.aggregate(total=Sum('monto_original'))['total'] or Decimal('0')
     total_saldo = prestamos.aggregate(total=Sum('saldo_actual'))['total'] or Decimal('0')
     activos = prestamos.filter(activo=True).count()
     inactivos = prestamos.filter(activo=False).count()
     total_prestamos = prestamos.count()
 
-    # Préstamos con saldo alto (top 5)
+    total_deuda_original = deudas.aggregate(total=Sum('monto_original'))['total'] or Decimal('0')
+    total_deuda_saldo = deudas.aggregate(total=Sum('saldo_actual'))['total'] or Decimal('0')
+    deudas_activas = deudas.filter(activo=True).count()
+    total_deudas = deudas.count()
+
+    # Préstamos y deudas con saldo alto (top 5 de cada uno)
     top_saldos = prestamos.filter(activo=True).order_by('-saldo_actual')[:5]
+    top_deudas = deudas.filter(activo=True).order_by('-saldo_actual')[:5]
 
     # Movimientos recientes (últimos 7 días)
     recientes = movimientos_visibles(request.user).filter(
@@ -85,6 +95,11 @@ def home(request):
         'inactivos': inactivos,
         'total_prestamos': total_prestamos,
         'top_saldos': top_saldos,
+        'total_deuda_original': total_deuda_original,
+        'total_deuda_saldo': total_deuda_saldo,
+        'deudas_activas': deudas_activas,
+        'total_deudas': total_deudas,
+        'top_deudas': top_deudas,
         'recientes': recientes,
         'proximos': proximos,
     }
@@ -94,11 +109,15 @@ def home(request):
 def lista_prestamos(request):
     """Vista para listar todos los préstamos con actualización diaria del saldo (Punto 5)."""
     q = request.GET.get('q', '').strip()
+    rol = request.GET.get('rol', 'todos')
     prestamos = prestamos_visibles(request.user)
+    if rol in (Prestamo.ROL_PRESTAMO, Prestamo.ROL_DEUDA):
+        prestamos = prestamos.filter(rol=rol)
     if q:
         qs_filter = (
             Q(nombre_cliente__icontains=q) |
-            Q(telefono__icontains=q)
+            Q(telefono__icontains=q) |
+            Q(concepto__icontains=q)
         )
         try:
             monto_q = Decimal(q.replace(',', '').replace('$', ''))
@@ -109,7 +128,18 @@ def lista_prestamos(request):
     hoy = timezone.now().date()
     for prestamo in prestamos:
         prestamo.actualizar_saldo(hoy)  # Actualiza el saldo considerando pagos e intereses
-    return render(request, 'prestamos/lista_prestamos.html', {'prestamos': prestamos})
+
+    titulos = {
+        Prestamo.ROL_DEUDA: 'Mis Deudas',
+        Prestamo.ROL_PRESTAMO: 'Préstamos Otorgados',
+    }
+    return render(request, 'prestamos/lista_prestamos.html', {
+        'prestamos': prestamos,
+        'q': q,
+        'rol': rol,
+        'titulo': titulos.get(rol, 'Préstamos y Deudas'),
+        'es_vista_deudas': rol == Prestamo.ROL_DEUDA,
+    })
 
 class CalculadoraView(LoginRequiredMixin, View):
     """Vista para la calculadora financiera (Puntos 1-2) y registro de préstamo (Punto 3)."""
@@ -152,6 +182,18 @@ class CalculadoraView(LoginRequiredMixin, View):
                     calculated_term = 0
                 calculated_payment = Decimal(pago).quantize(Decimal('0.01'))
                 result = f'Plazo calculado: {calculated_term} meses'
+
+            # Dejar el cálculo en sesión para que "Registrar" llegue prellenado.
+            # RegistrarPrestamoView lee esta misma clave; sin este guardado el
+            # prellenado nunca ocurría y el plazo siempre llegaba vacío.
+            request.session['calculadora_data'] = {
+                'monto_original': str(monto),
+                'tasa_interes_anual': str(tasa),
+                'tipo_pago': 'mensual',
+                'plazo_meses': calculated_term if isinstance(calculated_term, int) else None,
+                'pago_mensual': str(calculated_payment),
+                'modo': 'fixed_term' if tipo_calculo == 'pago' else 'fixed_payment',
+            }
 
             # Inicializar formulario de registro con datos calculados
             reg_form = RegistrationForm(initial={
@@ -210,16 +252,22 @@ class RegistrarPrestamoView(LoginRequiredMixin, View):
     def get(self, request):
         calc_data = request.session.get('calculadora_data', {})
         initial = {
+            'rol': request.GET.get('rol') or Prestamo.ROL_PRESTAMO,
             'monto_original': calc_data.get('monto_original'),
             'tasa_interes_anual': calc_data.get('tasa_interes_anual'),
             'tipo_pago': calc_data.get('tipo_pago', 'mensual'),
             'plazo_meses': calc_data.get('plazo_meses'),
-            'pago_mensual': calc_data.get('pago_mensual', Decimal('0')),
+            # Sin default 0: un 0 prellenado parece campo lleno pero no pasa la
+            # validación de "Pago Fijo", que era lo que bloqueaba el alta.
+            'pago_mensual': calc_data.get('pago_mensual'),
             'modo': calc_data.get('modo', 'fixed_term'),
             'fecha_inicio': date.today(),
         }
         form = RegistrarPrestamoForm(initial=initial)
-        return render(request, 'prestamos/registrar_prestamo.html', {'form': form})
+        return render(request, 'prestamos/registrar_prestamo.html', {
+            'form': form,
+            'viene_de_calculadora': bool(calc_data),
+        })
 
     def post(self, request):
         form = RegistrarPrestamoForm(request.POST)
@@ -229,23 +277,51 @@ class RegistrarPrestamoView(LoginRequiredMixin, View):
                     nombre = form.cleaned_data['nombre']
                     telefono = form.cleaned_data['telefono']
                     fecha_inicio = form.cleaned_data['fecha_inicio']
+                    modo = form.cleaned_data['modo']
+                    monto = form.cleaned_data['monto_original']
+                    tasa = form.cleaned_data['tasa_interes_anual']
+                    tipo_pago = form.cleaned_data['tipo_pago']
+                    plazo = form.cleaned_data.get('plazo_meses')
+                    pago = form.cleaned_data.get('pago_mensual')
+
+                    # Completar el dato que el modo elegido no pide. Además de
+                    # mostrar cuota y plazo en el detalle, pago_mensual es la base
+                    # del cargo por período en actualizar_saldo(): si queda en None
+                    # el préstamo nunca genera intereses.
+                    if modo == 'fixed_term' and not pago:
+                        pago = calculate_payment_for_term(monto, tasa, plazo, tipo_pago)
+                    elif modo == 'fixed_payment' and not plazo:
+                        try:
+                            plazo = calculate_term_for_payment(monto, tasa, pago, tipo_pago)
+                        except ValueError:
+                            # El pago no cubre ni los intereses: no se liquida
+                            # nunca. Se registra igual, sin plazo.
+                            plazo = None
+
                     cliente = Cliente.objects.create(owner=request.user, nombre=nombre, telefono=telefono)
                     prestamo = Prestamo.objects.create(
                         owner=request.user,
+                        rol=form.cleaned_data['rol'],
+                        concepto=form.cleaned_data['concepto'],
                         cliente=cliente,
                         nombre_cliente=nombre,
-                        monto_original=form.cleaned_data['monto_original'],
-                        tipo_pago=form.cleaned_data['tipo_pago'],
+                        telefono=telefono,
+                        monto_original=monto,
+                        tipo_pago=tipo_pago,
                         fecha_inicio=fecha_inicio,
-                        tasa_interes_anual=form.cleaned_data['tasa_interes_anual'],
-                        modo=form.cleaned_data['modo'],
-                        plazo_meses=form.cleaned_data.get('plazo_meses'),
-                        pago_mensual=form.cleaned_data.get('pago_mensual', Decimal('0')),
-                        saldo_actual=form.cleaned_data['monto_original']
+                        tasa_interes_anual=tasa,
+                        modo=modo,
+                        plazo_meses=plazo,
+                        pago_mensual=pago,
+                        saldo_actual=monto,
                     )
                     registrar_auditoria(request.user, 'crear', 'Prestamo', prestamo.pk,
-                                        f"{nombre} · ${form.cleaned_data['monto_original']}")
-                    messages.success(request, "Préstamo registrado exitosamente.")
+                                        f"{prestamo.get_rol_display()} · {nombre} · ${monto}")
+                    messages.success(
+                        request,
+                        "Deuda registrada exitosamente." if prestamo.es_deuda
+                        else "Préstamo registrado exitosamente.",
+                    )
                     if 'calculadora_data' in request.session:
                         del request.session['calculadora_data']
                     return redirect('prestamos:detalle_prestamo', pk=prestamo.pk)
@@ -272,10 +348,15 @@ class PrestamoDetailView(LoginRequiredMixin, DetailView):
         prestamo.actualizar_saldo(hoy)  # Punto 5: Actualiza saldo diario
         movimientos = prestamo.movimientos.order_by('fecha')
         amortizacion = prestamo.get_amortizacion()
+        total_pagado = (
+            prestamo.movimientos.filter(tipo='pago')
+            .aggregate(total=Sum('monto'))['total'] or Decimal('0.00')
+        )
         context.update({
             'amortizacion': amortizacion,
             'movimientos': movimientos,
             'saldo_actual': prestamo.saldo_actual,
+            'total_pagado': total_pagado,
             'fecha_actual': hoy,
         })
         return context
@@ -324,11 +405,16 @@ def registrar_incremento(request, prestamo_id):
                 with transaction.atomic():
                     prestamo.registrar_incremento(
                         form.cleaned_data['monto'],
-                        form.cleaned_data['fecha']
+                        form.cleaned_data['fecha'],
+                        form.cleaned_data.get('descripcion'),
                     )
                     registrar_auditoria(request.user, 'incremento', 'Prestamo', prestamo.pk,
                                         f"${form.cleaned_data['monto']} el {form.cleaned_data['fecha']}")
-                    messages.success(request, "Incremento de capital registrado exitosamente.")
+                    messages.success(
+                        request,
+                        "Cargo registrado exitosamente." if prestamo.es_deuda
+                        else "Incremento de capital registrado exitosamente.",
+                    )
             except Exception:
                 logger.exception("Error al registrar incremento (prestamo=%s)", prestamo_id)
                 messages.error(request, "Ocurrió un error al registrar el incremento. Intenta de nuevo.")

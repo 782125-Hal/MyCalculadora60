@@ -8,6 +8,7 @@ Aplicación web desarrollada con **Django 5** y **Django REST Framework** para g
 
 - Calculadora financiera: calcula pago mensual o plazo según el modo elegido
 - Registro de préstamos en modo **plazo fijo** o **pago fijo**
+- Registro de **deudas propias** (casa, terreno, auto) con sus pagos realizados
 - Tabla de amortización automática (mensual o semanal)
 - Registro de pagos e incrementos de capital
 - Actualización automática de saldo con cargos por mora
@@ -64,6 +65,26 @@ Generar una `SECRET_KEY` segura:
 ```bash
 python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
 ```
+
+---
+
+## Préstamos vs. deudas
+
+Un mismo modelo (`Prestamo`) cubre los dos sentidos del dinero mediante el campo `rol`:
+
+| `rol` | Significado | Un movimiento de tipo `pago` es… |
+|---|---|---|
+| `prestamo` | Presté dinero y me deben | un abono que me hizo el cliente |
+| `deuda` | Debo dinero por una compra a plazos | un abono que yo le hice al acreedor |
+
+En ambos casos el saldo baja con los pagos y sube con los cargos de los períodos
+no cubiertos, así que la amortización y `actualizar_saldo()` son las mismas. Una
+deuda sin intereses es simplemente `tasa_interes_anual = 0`. El campo `concepto`
+guarda qué se compró (ej. "Terreno en Misiones").
+
+El dashboard muestra los dos lados por separado —"Me deben" y "Yo debo"— porque
+son magnitudes opuestas y sumarlas en un solo total no significaría nada. Filtra
+con `?rol=deuda` o `?rol=prestamo` en `/prestamos/lista-prestamos/`.
 
 ---
 

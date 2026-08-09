@@ -37,6 +37,31 @@ class Cliente(models.Model):
         return self.nombre
 
 class Prestamo(models.Model):
+    """
+    Una obligación con tabla de amortización. El campo `rol` distingue los dos
+    sentidos del dinero sin duplicar la lógica financiera:
+
+      - 'prestamo': dinero que yo presté y me deben (el caso original).
+      - 'deuda':    dinero que yo debo por una compra a plazos (casa, terreno,
+                    auto). Los movimientos de tipo 'pago' son entonces pagos
+                    que yo realicé al acreedor.
+
+    En ambos casos el saldo baja con los pagos y sube con los cargos de los
+    períodos no cubiertos, así que `actualizar_saldo` y `get_amortizacion`
+    sirven igual. Una deuda sin intereses es `tasa_interes_anual = 0`.
+    """
+    ROL_PRESTAMO = 'prestamo'
+    ROL_DEUDA = 'deuda'
+    ROL_CHOICES = [
+        (ROL_PRESTAMO, 'Préstamo otorgado (me deben)'),
+        (ROL_DEUDA, 'Deuda propia (yo debo)'),
+    ]
+
+    rol = models.CharField(max_length=10, choices=ROL_CHOICES, default=ROL_PRESTAMO)
+    concepto = models.CharField(
+        max_length=200, blank=True,
+        help_text='Qué se compró o para qué fue el dinero. Ej: "Terreno en Misiones".'
+    )
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -65,7 +90,19 @@ class Prestamo(models.Model):
         default='fixed_payment'
     )
     def __str__(self):
-        return f'Préstamo de {self.nombre_cliente}'
+        etiqueta = 'Deuda con' if self.es_deuda else 'Préstamo de'
+        if self.concepto:
+            return f'{etiqueta} {self.nombre_cliente} — {self.concepto}'
+        return f'{etiqueta} {self.nombre_cliente}'
+
+    @property
+    def es_deuda(self):
+        return self.rol == self.ROL_DEUDA
+
+    @property
+    def titulo(self):
+        """Nombre legible: el concepto si existe, si no la contraparte."""
+        return self.concepto or self.nombre_cliente
 
     def save(self, *args, **kwargs):
         if not self.pk and not self.saldo_actual:
@@ -188,14 +225,17 @@ class Prestamo(models.Model):
             fecha_inicio=self.fecha_inicio,
         )
 
-    def registrar_incremento(self, monto_incremento, fecha):
+    def registrar_incremento(self, monto_incremento, fecha, descripcion=None):
         if monto_incremento > 0:
             Movimiento.objects.create(
                 prestamo=self,
                 fecha=fecha,
                 monto=Decimal(monto_incremento),
                 tipo='incremento_capital',
-                descripcion='Incremento de capital solicitado por cliente'
+                descripcion=descripcion or (
+                    'Cargo adicional a la deuda' if self.es_deuda
+                    else 'Incremento de capital solicitado por cliente'
+                ),
             )
             self.actualizar_saldo(fecha)
 

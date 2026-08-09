@@ -1,17 +1,75 @@
 {% extends 'base.html' %}
 
-{% block title %}Registrar Préstamo{% endblock %}
+{% block title %}Registrar Préstamo o Deuda{% endblock %}
 
 {% block content %}
-    <p>Bloque content desde base</p>
-    <h2>Registrar Nuevo Préstamo</h2>
-    <p>Complete los campos a continuación. Si viene de la calculadora, algunos campos estarán prellenados.</p>
+<h2 class="mb-1">Registrar Préstamo o Deuda</h2>
+<p class="text-muted">
+    Usa <strong>Préstamo otorgado</strong> para el dinero que prestaste, y
+    <strong>Deuda propia</strong> para lo que tú debes: una casa, un terreno, un auto.
+</p>
 
-    <form method="post" class="form">
-        {% csrf_token %}
-        {{ form.as_p }}  <!-- Renderiza cada campo como párrafo; puedes usar {{ form }} para tabla o personalizar -->
-        <button type="submit" class="btn btn-success">Registrar Préstamo</button>
-    </form>
+{% if viene_de_calculadora %}
+    <div class="alert alert-info py-2">
+        Se prellenaron los campos con el último cálculo de la calculadora. Puedes cambiarlos.
+    </div>
+{% endif %}
 
-    <a href="{% url 'prestamos:calculadora_financiera' %}" class="btn btn-secondary mt-3">Volver a Calculadora</a>
+{% if form.non_field_errors %}
+    <div class="alert alert-danger">{{ form.non_field_errors }}</div>
+{% endif %}
+
+<form method="post" novalidate class="row g-3" style="max-width: 720px;">
+    {% csrf_token %}
+
+    {% for field in form %}
+        {% if field.name == 'plazo_meses' %}
+            <div class="col-md-6" id="campo_plazo">
+        {% elif field.name == 'pago_mensual' %}
+            <div class="col-md-6" id="campo_pago">
+        {% else %}
+            <div class="col-md-6">
+        {% endif %}
+            <label for="{{ field.id_for_label }}" class="form-label">
+                {{ field.label }}{% if field.field.required %} <span class="text-danger">*</span>{% endif %}
+            </label>
+            {{ field }}
+            {% if field.help_text %}
+                <div class="form-text">{{ field.help_text }}</div>
+            {% endif %}
+            {% for error in field.errors %}
+                <div class="invalid-feedback d-block">{{ error }}</div>
+            {% endfor %}
+        </div>
+    {% endfor %}
+
+    <div class="col-12 mt-4">
+        <button type="submit" class="btn btn-success">Guardar</button>
+        <a href="{% url 'prestamos:lista_prestamos' %}" class="btn btn-outline-secondary">Cancelar</a>
+        <a href="{% url 'prestamos:calculadora_financiera' %}" class="btn btn-link">Ir a la calculadora</a>
+    </div>
+</form>
+
+<script>
+    // Bootstrap sobre los widgets que Django renderiza sin clases.
+    document.querySelectorAll('form.row input, form.row select').forEach(function (el) {
+        if (el.type === 'hidden' || el.type === 'checkbox') return;
+        el.classList.add(el.tagName === 'SELECT' ? 'form-select' : 'form-control');
+    });
+
+    // Sólo uno de los dos campos aplica según el modo. Mostrar el otro invita a
+    // llenarlo para que luego se ignore, o peor, a que falle la validación.
+    var modo = document.querySelector('[name="modo"]');
+    var campoPlazo = document.getElementById('campo_plazo');
+    var campoPago = document.getElementById('campo_pago');
+
+    function sincronizarModo() {
+        var esPlazoFijo = modo.value === 'fixed_term';
+        campoPlazo.style.display = esPlazoFijo ? '' : 'none';
+        campoPago.style.display = esPlazoFijo ? 'none' : '';
+    }
+
+    modo.addEventListener('change', sincronizarModo);
+    sincronizarModo();
+</script>
 {% endblock %}

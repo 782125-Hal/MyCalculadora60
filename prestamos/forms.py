@@ -2,7 +2,7 @@ from django import forms
 from decimal import Decimal
 from datetime import date
 
-from .models import Cliente
+from .models import Cliente, Prestamo
 
 class CalculatorForm(forms.Form):
     monto = forms.DecimalField(label='Monto del Préstamo', min_value=0)
@@ -38,18 +38,57 @@ class RegistrationForm(forms.Form):
 
 
 class RegistrarPrestamoForm(forms.Form):
-    nombre = forms.CharField(label='Nombre del Cliente', max_length=200)
+    """
+    Alta de un préstamo otorgado o de una deuda propia.
+
+    Sólo uno de `plazo_meses` / `pago_mensual` es obligatorio, según `modo`.
+    Ninguno de los dos se prellena con 0: un 0 se lee como "campo ya lleno"
+    pero no pasa la validación, que era la causa de que el alta no avanzara.
+    """
+    rol = forms.ChoiceField(
+        label='Tipo de registro',
+        choices=Prestamo.ROL_CHOICES,
+        initial=Prestamo.ROL_PRESTAMO,
+        help_text='"Deuda propia" es para lo que tú debes: una casa, un terreno, un auto.',
+    )
+    concepto = forms.CharField(
+        label='Concepto', max_length=200, required=False,
+        help_text='Opcional. Ej: "Terreno en Misiones".',
+    )
+    nombre = forms.CharField(
+        label='Contraparte', max_length=200,
+        help_text='El cliente que te debe, o el acreedor / vendedor al que le debes.',
+    )
     telefono = forms.CharField(label='Teléfono', max_length=20, required=False)
-    monto_original = forms.DecimalField(label='Monto Original', min_value=0)
-    tasa_interes_anual = forms.DecimalField(label='Tasa de Interés Anual (%)', min_value=0)
+    monto_original = forms.DecimalField(
+        label='Monto Original',
+        min_value=Decimal('0.01'), decimal_places=2, max_digits=15,
+        error_messages={'min_value': 'El monto debe ser mayor que cero.'},
+    )
+    tasa_interes_anual = forms.DecimalField(
+        label='Tasa de Interés Anual (%)',
+        min_value=Decimal('0'), decimal_places=2, max_digits=5,
+        help_text='Usa 0 si no genera intereses.',
+    )
     tipo_pago = forms.ChoiceField(
         label='Frecuencia de Pago',
         choices=[('mensual', 'Mensual'), ('semanal', 'Semanal')]
     )
-    fecha_inicio = forms.DateField(label='Fecha de Inicio', initial=date.today)
-    modo = forms.ChoiceField(label='Modo', choices=[('fixed_term', 'Plazo Fijo'), ('fixed_payment', 'Pago Fijo')])
-    plazo_meses = forms.IntegerField(label='Plazo en Periodos', min_value=1, required=False)
-    pago_mensual = forms.DecimalField(label='Pago Fijo', min_value=0, required=False)
+    fecha_inicio = forms.DateField(
+        label='Fecha de Inicio', initial=date.today,
+        widget=forms.DateInput(attrs={'type': 'date'}, format='%Y-%m-%d'),
+    )
+    modo = forms.ChoiceField(
+        label='Modo',
+        choices=[('fixed_term', 'Plazo Fijo — sé en cuántos períodos se liquida'),
+                 ('fixed_payment', 'Pago Fijo — sé cuánto se paga cada período')],
+    )
+    plazo_meses = forms.IntegerField(label='Plazo en Períodos', min_value=1, required=False)
+    pago_mensual = forms.DecimalField(
+        label='Pago por Período',
+        min_value=Decimal('0.01'), decimal_places=2, max_digits=15, required=False,
+        error_messages={'min_value': 'El pago debe ser mayor que cero.'},
+    )
 
     def clean(self):
         cleaned_data = super().clean()
@@ -58,9 +97,11 @@ class RegistrarPrestamoForm(forms.Form):
         pago = cleaned_data.get('pago_mensual')
 
         if modo == 'fixed_term' and not plazo:
-            self.add_error('plazo_meses', 'Debe proporcionar el plazo para el préstamo.')
+            self.add_error('plazo_meses',
+                           'En modo Plazo Fijo debes indicar en cuántos períodos se liquida.')
         if modo == 'fixed_payment' and not pago:
-            self.add_error('pago_mensual', 'Debe proporcionar el pago mensual fijo.')
+            self.add_error('pago_mensual',
+                           'En modo Pago Fijo debes indicar cuánto se paga cada período.')
 
         return cleaned_data
 
