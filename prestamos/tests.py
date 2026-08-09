@@ -10,7 +10,7 @@ Cubre:
 - Pagos, incrementos y saldo cero → inactivación
 """
 
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 
@@ -29,6 +29,7 @@ from .calculator import (
     calculate_term_for_payment,
     build_amortization_schedule,
     quantize_money,
+    quantize_payment,
 )
 
 
@@ -1092,3 +1093,74 @@ class CerrarPeriodosCommandTests(TestCase):
     def test_omite_inactivos(self):
         Prestamo.objects.filter(pk=self.prestamo.pk).update(activo=False)
         self.assertIn('Revisados 0', self._run())
+
+
+class RedondeoDeCuotaTests(TestCase):
+    """La cuota se redondea hacia arriba (ROUND_UP), no al más cercano.
+
+    Redondear la cuota hacia abajo la deja insuficiente: tras n períodos faltan
+    centavos y el préstamo no liquida dentro del plazo pactado.
+    """
+
+    # Casos verificados donde la fracción de centavo cae por debajo de 0.005:
+    # ROUND_HALF_UP redondearía hacia ABAJO y ROUND_UP hacia arriba, así que
+    # distinguen de verdad los dos modos. Un caso que redondee igual en ambos
+    # no probaría nada sobre este cambio.
+    CASOS = [
+        (Decimal('37500'), Decimal('18'), 8),    # exacta 5009.4009 → 5009.40 vs 5009.41
+        (Decimal('37500'), Decimal('18'), 13),   # exacta 3196.5134 → 3196.51 vs 3196.52
+        (Decimal('37500'), Decimal('18'), 23),   # exacta 1939.9032 → 1939.90 vs 1939.91
+        (Decimal('37500'), Decimal('18'), 16),   # exacta 2653.6904 → 2653.69 vs 2653.70
+    ]
+
+    def _cuota_exacta(self, monto, tasa, plazo):
+        """Cuota sin redondear, a 50 dígitos, para comparar contra la redondeada."""
+        with localcontext() as ctx:
+            ctx.prec = 50
+            r = Decimal(tasa) / Decimal('100') / Decimal('12')
+            tmp = (Decimal(1) + r) ** plazo
+            return Decimal(monto) * r * tmp / (tmp - Decimal(1))
+
+    def test_la_cuota_nunca_queda_por_debajo_de_la_exacta(self):
+        """Esta es la propiedad de ROUND_UP; con ROUND_HALF_UP fallaría."""
+        for monto, tasa, plazo in self.CASOS:
+            with self.subTest(monto=monto, tasa=tasa, plazo=plazo):
+                cuota = calculate_payment_for_term(monto, tasa, plazo)
+                exacta = self._cuota_exacta(monto, tasa, plazo)
+                self.assertGreaterEqual(cuota, exacta)
+                # Y no se pasa de un centavo: sigue siendo el redondeo mínimo suficiente.
+                self.assertLess(cuota - exacta, Decimal('0.01'))
+
+    def test_la_tabla_liquida_dentro_del_plazo(self):
+        """Con la cuota calculada, el saldo llega a 0 en el plazo pactado."""
+        for monto, tasa, plazo in self.CASOS:
+            with self.subTest(monto=monto, tasa=tasa, plazo=plazo):
+                tabla = build_amortization_schedule(
+                    monto=monto, tasa_anual=tasa, modo='fixed_term',
+                    tipo_pago='mensual', plazo=plazo, fecha_inicio=date(2025, 1, 1),
+                )
+                self.assertEqual(len(tabla), plazo)
+                self.assertEqual(tabla[-1]['saldo'], 0.0)
+
+    def test_el_ultimo_pago_absorbe_la_diferencia(self):
+        """El exceso del redondeo hacia arriba sale del último pago, que es menor."""
+        tabla = build_amortization_schedule(
+            monto=Decimal('100000'), tasa_anual=Decimal('12'), modo='fixed_term',
+            tipo_pago='mensual', plazo=7, fecha_inicio=date(2025, 1, 1),
+        )
+        self.assertLessEqual(tabla[-1]['pago'], tabla[0]['pago'])
+
+    def test_la_cuota_registrada_coincide_con_la_de_la_tabla(self):
+        """Si difirieran, el detalle mostraría una cuota y la tabla otra."""
+        monto, tasa, plazo = Decimal('100000'), Decimal('12'), 7
+        cuota = calculate_payment_for_term(monto, tasa, plazo)
+        tabla = build_amortization_schedule(
+            monto=monto, tasa_anual=tasa, modo='fixed_term',
+            tipo_pago='mensual', plazo=plazo, fecha_inicio=date(2025, 1, 1),
+        )
+        self.assertEqual(Decimal(str(tabla[0]['pago'])), cuota)
+
+    def test_los_importes_devengados_siguen_con_redondeo_normal(self):
+        """ROUND_UP es sólo para la cuota; intereses y saldos no cambian."""
+        self.assertEqual(quantize_money(Decimal('1.234')), Decimal('1.23'))
+        self.assertEqual(quantize_money(Decimal('1.235')), Decimal('1.24'))

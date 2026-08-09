@@ -10,7 +10,7 @@ Used by:
 - PrestamoViewSet.calcular (API)
 """
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, ROUND_UP
 from dateutil.relativedelta import relativedelta
 from datetime import date
 from typing import Literal, Optional, List, Dict, Any
@@ -40,6 +40,18 @@ def quantize_money(value: Decimal) -> Decimal:
     return value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
+def quantize_payment(value: Decimal) -> Decimal:
+    """Redondea una CUOTA hacia arriba, al centavo.
+
+    A diferencia de los importes ya devengados (intereses, capital, saldo), que
+    usan quantize_money, la cuota es una cantidad a pagar en el futuro y
+    redondearla hacia abajo la deja insuficiente: al cabo de n períodos faltan
+    centavos y el préstamo no liquida dentro del plazo pactado. ROUND_UP hace
+    que el último pago quede ligeramente menor en vez de dejar un residuo.
+    """
+    return value.quantize(Decimal('0.01'), rounding=ROUND_UP)
+
+
 def calculate_payment_for_term(
     monto: Decimal,
     tasa_anual: Decimal,
@@ -61,7 +73,7 @@ def calculate_payment_for_term(
         tmp = (Decimal(1) + tasa_periodo) ** plazo
         pago = balance * tasa_periodo * tmp / (tmp - Decimal(1))
 
-    return quantize_money(pago)
+    return quantize_payment(pago)
 
 
 def calculate_term_for_payment(
@@ -126,13 +138,15 @@ def build_amortization_schedule(
     if modo == 'fixed_term':
         if plazo is None or plazo <= 0:
             return []
-        # Calcular pago teórico (cuota)
+        # Calcular pago teórico (cuota). Mismo redondeo que
+        # calculate_payment_for_term, o la tabla mostraría una cuota distinta
+        # de la que se registró en el préstamo.
         if tasa_periodo == 0:
             pago = balance / Decimal(plazo)
         else:
             tmp = (Decimal(1) + tasa_periodo) ** plazo
             pago = balance * tasa_periodo * tmp / (tmp - Decimal(1))
-        pago = quantize_money(pago)
+        pago = quantize_payment(pago)
 
         max_iter = plazo + 5  # safety
         while periodo <= plazo and balance > 0 and periodo < max_iter:
