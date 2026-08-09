@@ -130,16 +130,18 @@ class Prestamo(models.Model):
         if fecha_actual is None:
             fecha_actual = datetime.date.today()
 
-        from .calculator import get_period_rate_and_delta
+        from .calculator import get_period_rate_and_delta, quantize_money
 
         with transaction.atomic():
             # DECISIÓN DE NEGOCIO (re-simulación retroactiva SIN perdones históricos):
             # se purgan TODOS los cargos de interés autogenerados y se regeneran desde
             # cero según la regla vigente. La simulación es la única fuente de verdad de
-            # los interes_cargo (por eso ya no hay guarda de "fecha ya cargada"). Todo
-            # período cuyos pagos reales NO cubran la mensualidad genera cargo pleno:
-            # esto incluye meses con pago parcial y los viejos cargos de $1.00, que ya
-            # NO se tratan como perdón.
+            # los interes_cargo (por eso ya no hay guarda de "fecha ya cargada").
+            #
+            # El interés de cada período se cobra sobre lo que FALTÓ por pagar, no sobre
+            # la mensualidad completa: quien abona parte de su cuota sólo devenga interés
+            # por el resto. El cargo se suma al capital, así que el saldo siguiente ya lo
+            # incluye.
             self.movimientos.filter(tipo='interes_cargo').delete()
 
             balance = Decimal(self.monto_original)
@@ -155,6 +157,21 @@ class Prestamo(models.Model):
             mov_index = 0
             num_mov = len(movimientos)
             pago_minimo = self.pago_mensual or Decimal('0')
+
+            # 0) Movimientos con fecha anterior o igual al inicio del préstamo.
+            # Se aplican al balance pero no pertenecen a ningún período. Sin este
+            # consumo previo el cursor se quedaba atascado en ellos —la condición
+            # del bucle exige fecha > fecha_periodo_start—, de modo que ningún pago
+            # posterior se contabilizaba y TODOS los períodos salían como no
+            # cubiertos. Basta un movimiento con el año mal capturado para que un
+            # préstamo al corriente devengue intereses en cada período.
+            while mov_index < num_mov and movimientos[mov_index].fecha <= self.fecha_inicio:
+                mov = movimientos[mov_index]
+                if mov.tipo == 'pago':
+                    balance -= mov.monto
+                elif mov.tipo == 'incremento_capital':
+                    balance += mov.monto
+                mov_index += 1
 
             # 1) Avanzar período por período hasta la fecha objetivo
             while fecha_periodo_start < fecha_actual:
@@ -173,18 +190,27 @@ class Prestamo(models.Model):
                         balance += mov.monto
                     mov_index += 1
 
-                # Cargo pleno si los pagos del período no cubren la mensualidad.
-                # pago_minimo 0 (pago_mensual None/0) => suma >= 0 siempre => nunca cobra.
-                if fecha_esperada <= fecha_actual and suma_pagos_periodo < pago_minimo:
-                    intereses = pago_minimo * tasa_periodo
-                    balance += intereses
-                    Movimiento.objects.create(
-                        prestamo=self,
-                        fecha=fecha_esperada,
-                        monto=intereses,
-                        tipo='interes_cargo',
-                        descripcion='Cargo por período no cubierto'
-                    )
+                # Interés sobre el faltante del período, no sobre la mensualidad
+                # entera: si la cuota es 3,975 y se abonaron 3,000, el interés
+                # corre sólo sobre los 975 restantes. Se suma al capital.
+                # pago_minimo 0 (pago_mensual None/0) => faltante <= 0 => nunca cobra.
+                if fecha_esperada <= fecha_actual:
+                    faltante = pago_minimo - suma_pagos_periodo
+                    intereses = quantize_money(faltante * tasa_periodo) if faltante > 0 else Decimal('0.00')
+                    # Un cargo de 0 no aporta información y ensucia el historial:
+                    # ocurre con tasa 0% o cuando el faltante redondea por debajo
+                    # del centavo.
+                    if intereses > 0:
+                        balance += intereses
+                        Movimiento.objects.create(
+                            prestamo=self,
+                            fecha=fecha_esperada,
+                            monto=intereses,
+                            tipo='interes_cargo',
+                            descripcion=(
+                                f'Interés sobre {faltante.quantize(Decimal("0.01"))} no cubierto'
+                            ),
+                        )
 
                 fecha_periodo_start = fecha_esperada
 

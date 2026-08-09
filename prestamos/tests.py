@@ -310,8 +310,9 @@ class PrestamoActualizarSaldoTest(TestCase):
 
 
 class PrestamoInteresRetroactivoTest(TestCase):
-    """Regla retroactiva: cobra cargo pleno salvo que la suma de pagos del período
-    cubra la mensualidad. Purga+regenera cargos (idempotente, sin perdones)."""
+    """Regla retroactiva: el interés corre sobre el faltante del período (cuota
+    menos lo abonado), no sobre la cuota entera. Purga+regenera cargos
+    (idempotente, sin perdones)."""
 
     def setUp(self):
         self.cliente = Cliente.objects.create(nombre="Retro Test")
@@ -340,15 +341,15 @@ class PrestamoInteresRetroactivoTest(TestCase):
         self.assertEqual(p.movimientos.filter(tipo='interes_cargo').count(), 0)
         self.assertEqual(p.saldo_actual, Decimal('90000.00'))  # 100000 - 10000, sin interés
 
-    def test_b_pago_parcial_genera_cargo_pleno(self):
-        """(b) Pago parcial (< mensualidad) → cargo pleno de una mensualidad."""
+    def test_b_pago_parcial_genera_cargo_sobre_el_faltante(self):
+        """(b) Pago parcial → interés sólo sobre lo que faltó, no sobre la cuota."""
         p = self._prestamo()
-        self._pago(p, '3000')  # 3000 < 10000
+        self._pago(p, '3000')  # abona 3000 de 10000; faltan 7000
         p.actualizar_saldo(self.hoy)
         cargos = p.movimientos.filter(tipo='interes_cargo')
         self.assertEqual(cargos.count(), 1)
-        self.assertEqual(cargos.first().monto, Decimal('100.00'))  # 10000 * 0.01, pleno
-        self.assertEqual(p.saldo_actual, Decimal('97100.00'))  # 100000 - 3000 + 100
+        self.assertEqual(cargos.first().monto, Decimal('70.00'))  # 7000 * 0.01
+        self.assertEqual(p.saldo_actual, Decimal('97070.00'))  # 100000 - 3000 + 70
 
     def test_c_dos_pagos_que_suman_mensualidad_sin_cargo(self):
         """(c) Dos pagos en el mismo período que juntos cubren la mensualidad → sin cargo."""
@@ -360,14 +361,14 @@ class PrestamoInteresRetroactivoTest(TestCase):
         self.assertEqual(p.saldo_actual, Decimal('90000.00'))
 
     def test_d_pago_de_un_peso_genera_cargo(self):
-        """(d) $1.00 NO es perdón: pago parcial → cargo pleno."""
+        """(d) $1.00 NO es perdón: sigue habiendo cargo, sobre los 9,999 faltantes."""
         p = self._prestamo()
         self._pago(p, '1.00')
         p.actualizar_saldo(self.hoy)
         cargos = p.movimientos.filter(tipo='interes_cargo')
         self.assertEqual(cargos.count(), 1)
-        self.assertEqual(cargos.first().monto, Decimal('100.00'))
-        self.assertEqual(p.saldo_actual, Decimal('100099.00'))  # 100000 - 1 + 100
+        self.assertEqual(cargos.first().monto, Decimal('99.99'))  # 9999 * 0.01
+        self.assertEqual(p.saldo_actual, Decimal('100098.99'))  # 100000 - 1 + 99.99
 
     def test_f_idempotencia_dos_corridas(self):
         """(f) Dos corridas seguidas → mismo saldo y sin cargos duplicados (purga+regenera)."""
@@ -1433,3 +1434,85 @@ class DetalleAccionesRapidasTests(TestCase):
         html = self._html(deuda)
         self.assertIn('Registrar Pago Realizado', html)
         self.assertIn('Registrar Cargo Adicional', html)
+
+
+class InteresSobreFaltanteTests(TestCase):
+    """El interés del período corre sobre lo que faltó por pagar, no sobre la
+    cuota entera, y se suma al capital."""
+
+    def _prestamo(self, tasa='10', **kw):
+        datos = dict(
+            nombre_cliente='Oscar', monto_original=Decimal('408000'),
+            tasa_interes_anual=Decimal(tasa), tipo_pago='semanal',
+            fecha_inicio=date(2025, 4, 3), saldo_actual=Decimal('408000'),
+            modo='fixed_payment', pago_mensual=Decimal('3975'),
+        )
+        datos.update(kw)
+        return Prestamo.objects.create(**datos)
+
+    def test_interes_proporcional_al_faltante(self):
+        p = self._prestamo()
+        Movimiento.objects.create(prestamo=p, fecha=date(2025, 4, 10),
+                                  monto=Decimal('3000'), tipo='pago')
+        p.actualizar_saldo(date(2025, 4, 11))
+        cargo = p.movimientos.get(tipo='interes_cargo')
+        # faltante 975 sobre tasa semanal 10%/52
+        esperado = (Decimal('975') * Decimal('10') / Decimal('100') / Decimal('52'))
+        self.assertEqual(cargo.monto, esperado.quantize(Decimal('0.01')))
+
+    def test_sin_pago_el_interes_corre_sobre_la_cuota_completa(self):
+        p = self._prestamo()
+        p.actualizar_saldo(date(2025, 4, 11))
+        cargo = p.movimientos.get(tipo='interes_cargo')
+        esperado = (Decimal('3975') * Decimal('10') / Decimal('100') / Decimal('52'))
+        self.assertEqual(cargo.monto, esperado.quantize(Decimal('0.01')))
+
+    def test_cuota_cubierta_no_genera_cargo(self):
+        p = self._prestamo()
+        Movimiento.objects.create(prestamo=p, fecha=date(2025, 4, 10),
+                                  monto=Decimal('3975'), tipo='pago')
+        p.actualizar_saldo(date(2025, 4, 11))
+        self.assertEqual(p.movimientos.filter(tipo='interes_cargo').count(), 0)
+
+    def test_el_cargo_se_suma_al_capital(self):
+        p = self._prestamo()
+        p.actualizar_saldo(date(2025, 4, 11))
+        cargo = p.movimientos.get(tipo='interes_cargo')
+        self.assertEqual(p.saldo_actual, Decimal('408000') + cargo.monto)
+
+    def test_tasa_cero_no_crea_movimientos_vacios(self):
+        """Antes se creaba un movimiento de $0.00 por período, que sólo ensuciaba
+        el historial."""
+        p = self._prestamo(tasa='0')
+        p.actualizar_saldo(date(2025, 5, 10))
+        self.assertEqual(p.movimientos.filter(tipo='interes_cargo').count(), 0)
+
+    def test_movimiento_anterior_al_inicio_no_bloquea_los_pagos(self):
+        """Un movimiento con el año mal capturado (p. ej. 0005 en vez de 2025)
+        atascaba el cursor: ningún pago posterior se contabilizaba y todos los
+        períodos salían como no cubiertos pese a estar al corriente."""
+        p = self._prestamo()
+        Movimiento.objects.create(prestamo=p, fecha=date(5, 4, 20),
+                                  monto=Decimal('3975'), tipo='pago')
+        for dia in (10, 17, 24):
+            Movimiento.objects.create(prestamo=p, fecha=date(2025, 4, dia),
+                                      monto=Decimal('3975'), tipo='pago')
+        p.actualizar_saldo(date(2025, 4, 25))
+        self.assertEqual(p.movimientos.filter(tipo='interes_cargo').count(), 0)
+
+    def test_el_movimiento_anterior_al_inicio_sigue_afectando_el_saldo(self):
+        """No se ignora: se aplica al balance, sólo que no pertenece a ningún período."""
+        p = self._prestamo(tasa='0')
+        Movimiento.objects.create(prestamo=p, fecha=date(5, 4, 20),
+                                  monto=Decimal('1000'), tipo='pago')
+        p.actualizar_saldo(date(2025, 4, 4))
+        self.assertEqual(p.saldo_actual, Decimal('407000.00'))
+
+    def test_pago_parcial_en_varios_abonos_suma(self):
+        """Dos abonos que juntos cubren la cuota no devengan interés."""
+        p = self._prestamo()
+        for dia, monto in ((6, '2000'), (9, '1975')):
+            Movimiento.objects.create(prestamo=p, fecha=date(2025, 4, dia),
+                                      monto=Decimal(monto), tipo='pago')
+        p.actualizar_saldo(date(2025, 4, 11))
+        self.assertEqual(p.movimientos.filter(tipo='interes_cargo').count(), 0)
