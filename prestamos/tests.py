@@ -1829,3 +1829,94 @@ class ImportadorFormatosLocalesTests(TestCase):
         self.assertEqual(validas[0]['monto_invertido'], Decimal('50000.00'))
         self.assertEqual(validas[0]['tasa_anual'], Decimal('9.75'))
         self.assertEqual(validas[0]['fecha_compra'], date(2026, 7, 20))
+
+
+class AportacionesEnElValorTests(TestCase):
+    """Las aportaciones y retiros deben moverse al saldo.
+
+    Antes valor_estimado() sólo miraba monto_invertido y valor_manual, así que
+    aportar dinero no cambiaba nada: la posición seguía valiendo lo mismo.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username='aport_tester', password='pw')
+
+    def _fondo(self, **kw):
+        datos = dict(
+            owner=self.user, plataforma=Inversion.PLATAFORMA_OTRA, nombre='IMSSdigital',
+            tipo=Inversion.TIPO_FONDO, monto_invertido=Decimal('5987.85'),
+            fecha_compra=date(2024, 9, 13), valor_manual=Decimal('5987.85'),
+        )
+        datos.update(kw)
+        return Inversion.objects.create(**datos)
+
+    def _mov(self, inv, tipo, monto, fecha):
+        return MovimientoInversion.objects.create(
+            inversion=inv, tipo=tipo, monto=Decimal(monto), fecha=fecha)
+
+    def test_las_aportaciones_suben_el_valor_del_fondo(self):
+        f = self._fondo()
+        self._mov(f, MovimientoInversion.TIPO_APORTACION, '10312.42', date(2024, 10, 1))
+        self._mov(f, MovimientoInversion.TIPO_APORTACION, '9979.75', date(2024, 11, 1))
+        self._mov(f, MovimientoInversion.TIPO_APORTACION, '10312.42', date(2024, 12, 1))
+        esperado = Decimal('5987.85') + Decimal('10312.42') + Decimal('9979.75') + Decimal('10312.42')
+        self.assertEqual(f.valor_estimado(date(2026, 8, 10)), esperado)
+
+    def test_capital_invertido_suma_aportaciones(self):
+        f = self._fondo()
+        self._mov(f, MovimientoInversion.TIPO_APORTACION, '10000', date(2024, 10, 1))
+        self.assertEqual(f.capital_invertido, Decimal('15987.85'))
+
+    def test_los_retiros_bajan_valor_y_capital(self):
+        f = self._fondo()
+        self._mov(f, MovimientoInversion.TIPO_RETIRO, '1000', date(2024, 10, 1))
+        self.assertEqual(f.capital_invertido, Decimal('4987.85'))
+        self.assertEqual(f.valor_estimado(date(2026, 8, 10)), Decimal('4987.85'))
+
+    def test_una_aportacion_no_se_cuenta_como_rendimiento(self):
+        """Compararla contra monto_invertido inflaría el rendimiento por el aporte entero."""
+        f = self._fondo()
+        self._mov(f, MovimientoInversion.TIPO_APORTACION, '10000', date(2024, 10, 1))
+        self.assertEqual(f.rendimiento(date(2026, 8, 10)), Decimal('0.00'))
+
+    def test_movimiento_anterior_al_corte_no_se_cuenta_dos_veces(self):
+        """Si el valor capturado ya incluye una aportación, volver a sumarla la duplicaría."""
+        f = self._fondo(valor_manual=Decimal('16300.27'), fecha_valor=date(2024, 10, 31))
+        self._mov(f, MovimientoInversion.TIPO_APORTACION, '10312.42', date(2024, 10, 1))  # ya incluida
+        self._mov(f, MovimientoInversion.TIPO_APORTACION, '9979.75', date(2024, 11, 1))   # posterior
+        self.assertEqual(f.valor_estimado(date(2026, 8, 10)),
+                         Decimal('16300.27') + Decimal('9979.75'))
+
+    def test_fondo_sin_valor_capturado_usa_el_capital(self):
+        f = self._fondo(valor_manual=None)
+        self._mov(f, MovimientoInversion.TIPO_APORTACION, '5000', date(2024, 10, 1))
+        self.assertEqual(f.valor_estimado(date(2026, 8, 10)), Decimal('10987.85'))
+
+    def test_aportacion_a_plazo_devenga_desde_su_propia_fecha(self):
+        """Dinero que entra a mitad del plazo no rinde como si hubiera estado desde el inicio."""
+        inv = Inversion.objects.create(
+            owner=self.user, plataforma=Inversion.PLATAFORMA_CETESDIRECTO, nombre='CETES',
+            tipo=Inversion.TIPO_DESCUENTO, monto_invertido=Decimal('10000'),
+            fecha_compra=date(2026, 1, 1), tasa_anual=Decimal('10'),
+            plazo_dias=360, base_dias=360,
+        )
+        self._mov(inv, MovimientoInversion.TIPO_APORTACION, '10000', date(2026, 7, 1))
+        hasta = date(2026, 12, 27)  # 360 días del original, 179 de la aportación
+        base = Decimal('10000') * (Decimal(1) + Decimal('0.10'))            # ciclo completo
+        aporte = Decimal('10000') * (Decimal(1) + Decimal('0.10') * Decimal(179) / Decimal(360))
+        self.assertEqual(inv.valor_estimado(hasta),
+                         (base + aporte).quantize(Decimal('0.01')))
+
+    def test_movimiento_futuro_no_afecta_el_valor_de_hoy(self):
+        f = self._fondo()
+        self._mov(f, MovimientoInversion.TIPO_APORTACION, '5000', date(2027, 1, 1))
+        self.assertEqual(f.valor_estimado(date(2026, 8, 10)), Decimal('5987.85'))
+
+    def test_el_portafolio_suma_el_capital_no_la_compra_inicial(self):
+        f = self._fondo()
+        self._mov(f, MovimientoInversion.TIPO_APORTACION, '10000', date(2024, 10, 1))
+        self.client.login(username='aport_tester', password='pw')
+        r = self.client.get(reverse('prestamos:portafolio'))
+        self.assertEqual(r.context['total_invertido'], Decimal('15987.85'))
+        self.assertEqual(r.context['total_valor'], Decimal('15987.85'))

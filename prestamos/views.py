@@ -914,13 +914,14 @@ def portafolio(request):
         posicion.rendimiento_hoy = posicion.rendimiento(hoy)
         posicion.dias_restantes = posicion.dias_para_vencer(hoy)
 
-        total_invertido += posicion.monto_invertido
+        posicion.capital = posicion.capital_invertido
+        total_invertido += posicion.capital
         total_valor += valor
 
         resumen = por_plataforma.setdefault(posicion.get_plataforma_display(), {
             'invertido': Decimal('0.00'), 'valor': Decimal('0.00'), 'posiciones': 0,
         })
-        resumen['invertido'] += posicion.monto_invertido
+        resumen['invertido'] += posicion.capital
         resumen['valor'] += valor
         resumen['posiciones'] += 1
 
@@ -980,6 +981,7 @@ def nueva_inversion(request):
                 plazo_dias=form.cleaned_data.get('plazo_dias') or 0,
                 base_dias=int(form.cleaned_data['base_dias']),
                 valor_manual=form.cleaned_data.get('valor_manual'),
+                fecha_valor=form.cleaned_data.get('fecha_valor'),
                 notas=form.cleaned_data.get('notas', ''),
             )
             registrar_auditoria(request.user, 'crear', 'Inversion', inversion.pk,
@@ -1000,6 +1002,10 @@ def detalle_inversion(request, pk):
     hoy = timezone.now().date()
     return render(request, 'prestamos/detalle_inversion.html', {
         'inversion': inversion,
+        'capital_invertido': inversion.capital_invertido,
+        'aportaciones': inversion.aportaciones,
+        'retiros': inversion.retiros,
+        'rendimientos_cobrados': inversion.rendimientos_cobrados,
         'valor_hoy': inversion.valor_estimado(hoy),
         'valor_vencimiento': inversion.valor_al_vencimiento(),
         'rendimiento_hoy': inversion.rendimiento(hoy),

@@ -18,7 +18,14 @@
     <div class="card-body">
         <div class="row">
             <div class="col-md-6">
-                <p><strong>Monto invertido:</strong> ${{ inversion.monto_invertido|floatformat:2 }}</p>
+                <p><strong>Compra inicial:</strong> ${{ inversion.monto_invertido|floatformat:2 }}</p>
+                {% if aportaciones %}
+                    <p><strong>Aportaciones:</strong> +${{ aportaciones|floatformat:2 }}</p>
+                {% endif %}
+                {% if retiros %}
+                    <p><strong>Retiros:</strong> −${{ retiros|floatformat:2 }}</p>
+                {% endif %}
+                <p><strong>Capital invertido:</strong> ${{ capital_invertido|floatformat:2 }}</p>
                 <p><strong>Fecha de compra:</strong> {{ inversion.fecha_compra|date:'d M Y' }}</p>
                 {% if not inversion.es_fondo %}
                     <p><strong>Tasa anual:</strong> {{ inversion.tasa_anual }}%</p>
@@ -45,14 +52,23 @@
             </div>
         </div>
 
-        {% if inversion.es_fondo %}
+        {% if inversion.valor_manual is not None %}
             <div class="alert alert-info py-2 mb-0">
-                Los fondos no se proyectan: su valor depende del precio diario de la acción.
-                El importe mostrado es el que capturaste.
+                {% if inversion.es_fondo %}
+                    Los fondos no se proyectan: su valor depende del precio diario de la acción.
+                {% else %}
+                    Se muestra el valor que capturaste a mano, no el proyectado.
+                {% endif %}
+                Se parte de <strong>${{ inversion.valor_manual|floatformat:2 }}</strong> al
+                {{ inversion.fecha_valor|default:inversion.fecha_compra|date:'d M Y' }}, y se le
+                aplican las aportaciones y retiros posteriores a esa fecha.
+                Cuando tu estado de cuenta muestre otra cifra, actualízala en
+                <a href="{% url 'prestamos:nueva_inversion' %}" class="alert-link">Editar</a>.
             </div>
-        {% elif inversion.valor_manual is not None %}
+        {% elif inversion.es_fondo %}
             <div class="alert alert-warning py-2 mb-0">
-                Se está mostrando el valor que capturaste a mano, no el proyectado.
+                Este fondo no tiene valor capturado, así que se muestra el capital invertido.
+                Captura el saldo de tu estado de cuenta para ver el rendimiento real.
             </div>
         {% endif %}
 

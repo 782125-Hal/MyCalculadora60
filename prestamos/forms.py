@@ -310,6 +310,12 @@ class InversionForm(forms.Form):
         max_digits=15, decimal_places=2,
         help_text='Obligatorio en fondos. En los demás, sólo si quieres forzar un valor.',
     )
+    fecha_valor = forms.DateField(
+        label='Valor a la fecha', required=False,
+        widget=forms.DateInput(attrs={'type': 'date'}, format='%Y-%m-%d'),
+        help_text='A qué día corresponde el valor capturado. Las aportaciones y retiros '
+                  'posteriores se suman o restan sobre él. Vacío = fecha de compra.',
+    )
     notas = forms.CharField(label='Notas', required=False, widget=forms.Textarea(attrs={'rows': 2}))
 
     def clean(self):

@@ -404,6 +404,11 @@ class Inversion(models.Model):
         max_digits=15, decimal_places=2, null=True, blank=True,
         help_text='Valor capturado. Obligatorio en fondos, que no se proyectan.',
     )
+    fecha_valor = models.DateField(
+        null=True, blank=True,
+        help_text='Fecha a la que corresponde el valor capturado. Las aportaciones y '
+                  'retiros posteriores se suman o restan sobre él. Por defecto, la de compra.',
+    )
     activa = models.BooleanField(default=True)
     notas = models.TextField(blank=True)
     creada = models.DateTimeField(auto_now_add=True, null=True, blank=True)
@@ -432,20 +437,73 @@ class Inversion(models.Model):
         return dias_transcurridos(self.fecha_compra, hasta or datetime.date.today(),
                                   self.plazo_dias)
 
+    def _suma(self, tipo):
+        return sum((m.monto for m in self.movimientos.all() if m.tipo == tipo), Decimal('0.00'))
+
+    @property
+    def aportaciones(self):
+        return self._suma(MovimientoInversion.TIPO_APORTACION)
+
+    @property
+    def retiros(self):
+        return self._suma(MovimientoInversion.TIPO_RETIRO)
+
+    @property
+    def rendimientos_cobrados(self):
+        return self._suma(MovimientoInversion.TIPO_RENDIMIENTO)
+
+    @property
+    def capital_invertido(self):
+        """Dinero puesto de tu bolsillo: la compra inicial más aportaciones, menos retiros.
+
+        Es distinto de `monto_invertido`, que sólo registra la operación de origen.
+        """
+        return self.monto_invertido + self.aportaciones - self.retiros
+
     def valor_estimado(self, hasta=None):
         """
-        Valor de la posición a `hasta`.
+        Valor de la posición a `hasta`, incluidas aportaciones y retiros.
 
-        En fondos devuelve el valor capturado (o el monto invertido si aún no se
-        ha capturado ninguno): proyectarlos sería inventar un precio de mercado.
+        Con valor capturado (siempre en fondos, que no se proyectan) se parte de
+        ese importe y se le aplican los movimientos POSTERIORES a `fecha_valor`:
+        el corte ya refleja lo ocurrido hasta esa fecha, así que sumar de nuevo
+        una aportación anterior la contaría dos veces.
+
+        Sin valor capturado, cada aportación devenga por su cuenta desde su
+        propia fecha: dinero que entró a mitad del plazo no puede rendir como si
+        hubiera estado desde el inicio.
         """
-        from .portafolio import valor_devengado
-        if self.es_fondo:
-            return self.valor_manual if self.valor_manual is not None else self.monto_invertido
+        from .portafolio import valor_devengado, dias_transcurridos
+        hasta = hasta or datetime.date.today()
+
         if self.valor_manual is not None:
-            return self.valor_manual
-        return valor_devengado(self.monto_invertido, self.tasa_anual,
-                               self.dias_devengados(hasta), self.base_dias)
+            corte = self.fecha_valor or self.fecha_compra
+            posteriores = Decimal('0.00')
+            for mov in self.movimientos.all():
+                if mov.fecha <= corte or mov.fecha > hasta:
+                    continue
+                if mov.tipo == MovimientoInversion.TIPO_APORTACION:
+                    posteriores += mov.monto
+                elif mov.tipo == MovimientoInversion.TIPO_RETIRO:
+                    posteriores -= mov.monto
+            return self.valor_manual + posteriores
+
+        if self.es_fondo:
+            # Sin captura no hay precio de mercado que valga; el capital es lo
+            # único defendible.
+            return self.capital_invertido
+
+        valor = valor_devengado(self.monto_invertido, self.tasa_anual,
+                                self.dias_devengados(hasta), self.base_dias)
+        for mov in self.movimientos.all():
+            if mov.fecha > hasta:
+                continue
+            if mov.tipo == MovimientoInversion.TIPO_APORTACION:
+                dias = dias_transcurridos(mov.fecha, hasta, self.plazo_dias or 0)
+                valor += valor_devengado(mov.monto, self.tasa_anual, dias, self.base_dias)
+            elif mov.tipo == MovimientoInversion.TIPO_RETIRO:
+                valor -= mov.monto
+        return valor
 
     def valor_al_vencimiento(self):
         from .portafolio import valor_al_vencimiento
@@ -455,12 +513,14 @@ class Inversion(models.Model):
                                     self.plazo_dias, self.base_dias)
 
     def rendimiento(self, hasta=None):
-        """Ganancia devengada a la fecha, más los rendimientos ya cobrados."""
-        cobrado = sum(
-            (m.monto for m in self.movimientos.all() if m.tipo == MovimientoInversion.TIPO_RENDIMIENTO),
-            Decimal('0.00'),
-        )
-        return self.valor_estimado(hasta) - self.monto_invertido + cobrado
+        """
+        Ganancia sobre el capital realmente puesto, más lo ya cobrado.
+
+        Se compara contra `capital_invertido` y no contra `monto_invertido`: una
+        aportación es dinero tuyo, no ganancia, y restarla mal inflaría el
+        rendimiento por el importe íntegro del aporte.
+        """
+        return self.valor_estimado(hasta) - self.capital_invertido + self.rendimientos_cobrados
 
     @property
     def vencida(self):
