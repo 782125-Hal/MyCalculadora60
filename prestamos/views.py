@@ -1059,3 +1059,69 @@ def _flash_errores(request, form):
     for campo, errores in form.errors.items():
         for error in errores:
             messages.error(request, f"{campo}: {error}")
+
+
+@login_required
+def editar_movimiento_inversion(request, pk):
+    """Edita un movimiento del portafolio. El queryset se acota a las posiciones
+    visibles: un pk ajeno da 404, no una edición silenciosa."""
+    movimiento = get_object_or_404(
+        MovimientoInversion.objects.filter(inversion__in=inversiones_visibles(request.user)),
+        pk=pk,
+    )
+
+    if request.method != 'POST':
+        form = MovimientoInversionForm(initial={
+            'tipo': movimiento.tipo,
+            'monto': movimiento.monto,
+            'fecha': movimiento.fecha,
+            'descripcion': movimiento.descripcion,
+        })
+        return render(request, 'prestamos/editar_movimiento_inversion.html', {
+            'form': form, 'movimiento': movimiento,
+        })
+
+    form = MovimientoInversionForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, "Corrija los errores marcados abajo.")
+        return render(request, 'prestamos/editar_movimiento_inversion.html', {
+            'form': form, 'movimiento': movimiento,
+        })
+
+    try:
+        with transaction.atomic():
+            movimiento.tipo = form.cleaned_data['tipo']
+            movimiento.monto = form.cleaned_data['monto']
+            movimiento.fecha = form.cleaned_data['fecha']
+            movimiento.descripcion = form.cleaned_data.get('descripcion', '')
+            movimiento.save()
+            registrar_auditoria(request.user, 'editar', 'MovimientoInversion', movimiento.pk,
+                                f"{movimiento.tipo} ${movimiento.monto}")
+        messages.success(request, "Movimiento actualizado.")
+    except Exception:
+        logger.exception("Error al editar movimiento de inversión %s", pk)
+        messages.error(request, "Ocurrió un error al actualizar el movimiento.")
+    return redirect('prestamos:detalle_inversion', pk=movimiento.inversion_id)
+
+
+@login_required
+def borrar_movimiento_inversion(request, pk):
+    movimiento = get_object_or_404(
+        MovimientoInversion.objects.filter(inversion__in=inversiones_visibles(request.user)),
+        pk=pk,
+    )
+    inversion_id = movimiento.inversion_id
+
+    if request.method != 'POST':
+        return redirect('prestamos:detalle_inversion', pk=inversion_id)
+
+    try:
+        with transaction.atomic():
+            detalle = f"{movimiento.tipo} ${movimiento.monto} del {movimiento.fecha}"
+            movimiento.delete()
+            registrar_auditoria(request.user, 'borrar', 'MovimientoInversion', pk, detalle)
+        messages.success(request, "Movimiento eliminado.")
+    except Exception:
+        logger.exception("Error al borrar movimiento de inversión %s", pk)
+        messages.error(request, "Ocurrió un error al eliminar el movimiento.")
+    return redirect('prestamos:detalle_inversion', pk=inversion_id)

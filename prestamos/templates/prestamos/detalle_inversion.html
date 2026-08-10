@@ -64,7 +64,7 @@
     <div class="col-md-7">
         <h5>Movimientos</h5>
         <table class="table table-sm table-striped">
-            <thead><tr><th>Fecha</th><th>Tipo</th><th class="text-end">Monto</th><th>Descripción</th></tr></thead>
+            <thead><tr><th>Fecha</th><th>Tipo</th><th class="text-end">Monto</th><th>Descripción</th><th>Acciones</th></tr></thead>
             <tbody>
             {% for m in movimientos %}
                 <tr>
@@ -72,9 +72,21 @@
                     <td>{{ m.get_tipo_display }}</td>
                     <td class="text-end">${{ m.monto|floatformat:2 }}</td>
                     <td class="small text-muted">{{ m.descripcion }}</td>
+                    <td class="text-nowrap">
+                        <a href="{% url 'prestamos:editar_movimiento_inversion' pk=m.pk %}"
+                           class="btn btn-sm btn-primary">Editar</a>
+                        <form action="{% url 'prestamos:borrar_movimiento_inversion' pk=m.pk %}"
+                              method="post" class="d-inline">
+                            {% csrf_token %}
+                            <button type="submit" class="btn btn-sm btn-danger"
+                                    onclick="return confirm('¿Eliminar este movimiento de ${{ m.monto|floatformat:2 }}?');">
+                                Eliminar
+                            </button>
+                        </form>
+                    </td>
                 </tr>
             {% empty %}
-                <tr><td colspan="4" class="text-center">Sin movimientos.</td></tr>
+                <tr><td colspan="5" class="text-center">Sin movimientos.</td></tr>
             {% endfor %}
             </tbody>
         </table>

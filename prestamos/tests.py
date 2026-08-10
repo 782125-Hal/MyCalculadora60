@@ -1516,3 +1516,76 @@ class InteresSobreFaltanteTests(TestCase):
                                       monto=Decimal(monto), tipo='pago')
         p.actualizar_saldo(date(2025, 4, 11))
         self.assertEqual(p.movimientos.filter(tipo='interes_cargo').count(), 0)
+
+
+class MovimientoInversionEdicionTests(TestCase):
+    """Editar y borrar movimientos del portafolio."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username='mov_inv_tester', password='pw')
+        cls.inversion = Inversion.objects.create(
+            owner=cls.user, plataforma=Inversion.PLATAFORMA_OTRA, nombre='IMSSdigital',
+            tipo=Inversion.TIPO_FONDO, monto_invertido=Decimal('5987.85'),
+            fecha_compra=date(2024, 9, 13), valor_manual=Decimal('5987.85'),
+        )
+
+    def setUp(self):
+        self.client.login(username='mov_inv_tester', password='pw')
+        self.mov = MovimientoInversion.objects.create(
+            inversion=self.inversion, fecha=date(2024, 11, 1), monto=Decimal('9979.75'),
+            tipo=MovimientoInversion.TIPO_APORTACION, descripcion='',
+        )
+
+    def test_los_botones_aparecen_en_la_tabla(self):
+        html = self.client.get(
+            reverse('prestamos:detalle_inversion', args=[self.inversion.pk])).content.decode()
+        self.assertIn(reverse('prestamos:editar_movimiento_inversion', args=[self.mov.pk]), html)
+        self.assertIn(reverse('prestamos:borrar_movimiento_inversion', args=[self.mov.pk]), html)
+
+    def test_editar_actualiza_los_campos(self):
+        response = self.client.post(
+            reverse('prestamos:editar_movimiento_inversion', args=[self.mov.pk]),
+            {'tipo': 'rendimiento', 'monto': '150.50', 'fecha': '2024-12-01',
+             'descripcion': 'Corregido'})
+        self.assertEqual(response.status_code, 302)
+        self.mov.refresh_from_db()
+        self.assertEqual(self.mov.tipo, 'rendimiento')
+        self.assertEqual(self.mov.monto, Decimal('150.50'))
+        self.assertEqual(self.mov.fecha, date(2024, 12, 1))
+        self.assertEqual(self.mov.descripcion, 'Corregido')
+
+    def test_editar_con_monto_invalido_no_guarda(self):
+        response = self.client.post(
+            reverse('prestamos:editar_movimiento_inversion', args=[self.mov.pk]),
+            {'tipo': 'aportacion', 'monto': '0', 'fecha': '2024-11-01', 'descripcion': ''})
+        self.assertEqual(response.status_code, 200)
+        self.mov.refresh_from_db()
+        self.assertEqual(self.mov.monto, Decimal('9979.75'))
+
+    def test_borrar_elimina_el_movimiento(self):
+        response = self.client.post(
+            reverse('prestamos:borrar_movimiento_inversion', args=[self.mov.pk]))
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(MovimientoInversion.objects.filter(pk=self.mov.pk).exists())
+
+    def test_borrar_por_get_no_elimina(self):
+        """Un GET no debe destruir datos: sólo redirige."""
+        self.client.get(reverse('prestamos:borrar_movimiento_inversion', args=[self.mov.pk]))
+        self.assertTrue(MovimientoInversion.objects.filter(pk=self.mov.pk).exists())
+
+    def test_no_se_puede_tocar_el_movimiento_de_otro(self):
+        otro = User.objects.create_user(username='ajeno_mov', password='pw')
+        self.client.force_login(otro)
+        self.assertEqual(self.client.get(
+            reverse('prestamos:editar_movimiento_inversion', args=[self.mov.pk])).status_code, 404)
+        self.assertEqual(self.client.post(
+            reverse('prestamos:borrar_movimiento_inversion', args=[self.mov.pk])).status_code, 404)
+        self.assertTrue(MovimientoInversion.objects.filter(pk=self.mov.pk).exists())
+
+    def test_requiere_login(self):
+        self.client.logout()
+        response = self.client.get(
+            reverse('prestamos:editar_movimiento_inversion', args=[self.mov.pk]))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('login', response.url)
