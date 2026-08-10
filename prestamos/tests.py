@@ -14,11 +14,12 @@ from decimal import Decimal, localcontext
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 
-from io import StringIO
+from io import BytesIO, StringIO
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -34,6 +35,7 @@ from .calculator import (
     quantize_money,
     quantize_payment,
 )
+from .importador import leer_tabla, procesar, a_fecha, a_decimal
 from .portafolio import (
     precio_cete,
     valor_devengado,
@@ -1589,3 +1591,241 @@ class MovimientoInversionEdicionTests(TestCase):
             reverse('prestamos:editar_movimiento_inversion', args=[self.mov.pk]))
         self.assertEqual(response.status_code, 302)
         self.assertIn('login', response.url)
+
+
+class ImportadorParsingTests(TestCase):
+    """Lectura y validación de archivos. Sin tocar la base."""
+
+    def _csv(self, contenido, nombre='datos.csv'):
+        return SimpleUploadedFile(nombre, contenido.encode('utf-8'), content_type='text/csv')
+
+    def test_lee_csv_con_coma(self):
+        f = self._csv('fecha,monto,tipo\n2025-04-18,3975.00,pago\n')
+        filas, error = leer_tabla(f, 'datos.csv')
+        self.assertIsNone(error)
+        self.assertEqual(len(filas), 1)
+        self.assertEqual(filas[0]['monto'], '3975.00')
+
+    def test_lee_csv_con_punto_y_coma(self):
+        """Excel en español exporta con ';'."""
+        f = self._csv('fecha;monto;tipo\n2025-04-18;3975.00;pago\n')
+        filas, error = leer_tabla(f, 'datos.csv')
+        self.assertIsNone(error)
+        self.assertEqual(len(filas), 1)
+
+    def test_encabezados_con_acentos_y_mayusculas(self):
+        f = self._csv('Fecha,MONTO,Descripción\n2025-04-18,100,Hola\n')
+        filas, _ = leer_tabla(f, 'datos.csv')
+        self.assertIn('descripcion', filas[0])
+        self.assertIn('monto', filas[0])
+
+    def test_lee_excel(self):
+        from openpyxl import Workbook
+        libro = Workbook()
+        hoja = libro.active
+        hoja.append(['fecha', 'monto', 'tipo'])
+        hoja.append([date(2025, 4, 18), 3975, 'pago'])
+        buffer = BytesIO()
+        libro.save(buffer)
+        buffer.seek(0)
+        subido = SimpleUploadedFile('datos.xlsx', buffer.read())
+        filas, error = leer_tabla(subido, 'datos.xlsx')
+        self.assertIsNone(error)
+        self.assertEqual(filas[0]['fecha'], date(2025, 4, 18))
+
+    def test_formato_no_soportado(self):
+        f = SimpleUploadedFile('datos.pdf', b'%PDF-1.4', content_type='application/pdf')
+        filas, error = leer_tabla(f, 'datos.pdf')
+        self.assertIn('Formato no reconocido', error)
+
+    def test_montos_con_simbolos(self):
+        self.assertEqual(a_decimal('$3,975.00'), Decimal('3975.00'))
+        self.assertEqual(a_decimal(' 1 234.50 '.replace(' ', '')), Decimal('1234.50'))
+
+    def test_fechas_en_varios_formatos(self):
+        for texto in ('2025-04-18', '18/04/2025', '18-04-2025'):
+            self.assertEqual(a_fecha(texto), date(2025, 4, 18))
+
+    def test_rechaza_anio_absurdo(self):
+        """El bug de las fechas 0005 no debe poder entrar por importación."""
+        with self.assertRaises(ValueError) as ctx:
+            a_fecha('0005-04-20')
+        self.assertIn('mal capturado', str(ctx.exception))
+
+    def test_fila_con_error_se_reporta_con_su_linea(self):
+        f = self._csv('fecha,monto,tipo\n2025-04-18,3975,pago\nsin_fecha,abc,pago\n')
+        filas, _ = leer_tabla(f, 'datos.csv')
+        validas, errores = procesar(filas, 'movimientos_prestamo')
+        self.assertEqual(len(validas), 1)
+        self.assertEqual(len(errores), 1)
+        self.assertEqual(errores[0]['linea'], 3)
+
+    def test_tipo_invalido_lista_las_opciones(self):
+        f = self._csv('fecha,monto,tipo\n2025-04-18,100,berenjena\n')
+        filas, _ = leer_tabla(f, 'datos.csv')
+        _, errores = procesar(filas, 'movimientos_inversion')
+        self.assertIn('Opciones:', errores[0]['motivo'])
+
+    def test_prestamo_pago_fijo_exige_cuota(self):
+        f = self._csv('rol,contraparte,monto,tasa,frecuencia,fecha_inicio,modo\n'
+                      'prestamo,Oscar,408000,21,semanal,2025-04-03,pago_fijo\n')
+        filas, _ = leer_tabla(f, 'datos.csv')
+        _, errores = procesar(filas, 'prestamos')
+        self.assertIn('Pago Fijo', errores[0]['motivo'])
+
+    def test_fondo_exige_valor(self):
+        f = self._csv('plataforma,nombre,tipo,monto,fecha_compra\n'
+                      'otra,BONDDIA,fondo,5000,2025-01-01\n')
+        filas, _ = leer_tabla(f, 'datos.csv')
+        _, errores = procesar(filas, 'inversiones')
+        self.assertIn('valor', errores[0]['motivo'])
+
+
+class ImportarViewTests(TestCase):
+    """Flujo completo: previsualizar y confirmar."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username='import_tester', password='pw')
+        cls.prestamo = Prestamo.objects.create(
+            owner=cls.user, nombre_cliente='Oscar', monto_original=Decimal('408000'),
+            tasa_interes_anual=Decimal('21'), tipo_pago='semanal',
+            fecha_inicio=date(2025, 4, 3), saldo_actual=Decimal('408000'),
+            modo='fixed_payment', pago_mensual=Decimal('3975'),
+        )
+
+    def setUp(self):
+        self.client.login(username='import_tester', password='pw')
+
+    def _subir(self, contenido, tipo='movimientos_prestamo', destino=None, nombre='p.csv'):
+        datos = {'tipo': tipo,
+                 'archivo': SimpleUploadedFile(nombre, contenido.encode('utf-8'))}
+        if destino is not None:
+            datos['destino_id'] = destino
+        return self.client.post(reverse('prestamos:importar'), datos)
+
+    def test_previsualizar_no_escribe_nada(self):
+        antes = Movimiento.objects.count()
+        r = self._subir('fecha,monto,tipo\n2025-04-18,3975,pago\n', destino=self.prestamo.pk)
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.context['previsualizacion'])
+        self.assertEqual(len(r.context['validas']), 1)
+        self.assertEqual(Movimiento.objects.count(), antes)
+
+    def test_confirmar_crea_los_movimientos(self):
+        self._subir('fecha,monto,tipo\n2025-04-18,3975,pago\n2025-04-25,3975,pago\n',
+                    destino=self.prestamo.pk)
+        r = self.client.post(reverse('prestamos:importar_confirmar'))
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual(self.prestamo.movimientos.filter(tipo='pago').count(), 2)
+
+    def test_confirmar_recalcula_el_saldo(self):
+        self._subir('fecha,monto,tipo\n2025-04-10,3975,pago\n', destino=self.prestamo.pk)
+        self.client.post(reverse('prestamos:importar_confirmar'))
+        self.prestamo.refresh_from_db()
+        self.assertLess(self.prestamo.saldo_actual, Decimal('408000'))
+
+    def test_confirmar_sin_previsualizar_no_hace_nada(self):
+        r = self.client.post(reverse('prestamos:importar_confirmar'))
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual(Movimiento.objects.count(), 0)
+
+    def test_las_filas_con_error_no_se_importan(self):
+        self._subir('fecha,monto,tipo\n2025-04-18,3975,pago\nbasura,x,pago\n',
+                    destino=self.prestamo.pk)
+        self.client.post(reverse('prestamos:importar_confirmar'))
+        self.assertEqual(self.prestamo.movimientos.filter(tipo='pago').count(), 1)
+
+    def test_avisa_de_duplicados_sin_bloquear(self):
+        Movimiento.objects.create(prestamo=self.prestamo, fecha=date(2025, 4, 18),
+                                  monto=Decimal('3975'), tipo='pago')
+        r = self._subir('fecha,monto,tipo\n2025-04-18,3975,pago\n', destino=self.prestamo.pk)
+        self.assertEqual(len(r.context['duplicados']), 1)
+        self.assertEqual(len(r.context['validas']), 1)
+
+    def test_no_se_puede_importar_a_un_prestamo_ajeno(self):
+        otro = User.objects.create_user(username='ajeno_imp', password='pw')
+        ajeno = Prestamo.objects.create(
+            owner=otro, nombre_cliente='De otro', monto_original=Decimal('100'),
+            tasa_interes_anual=Decimal('0'), tipo_pago='mensual',
+            fecha_inicio=date(2025, 1, 1), saldo_actual=Decimal('100'))
+        r = self._subir('fecha,monto,tipo\n2025-04-18,100,pago\n', destino=ajeno.pk)
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.context.get('previsualizacion'))
+        self.assertEqual(ajeno.movimientos.count(), 0)
+
+    def test_alta_masiva_de_prestamos(self):
+        contenido = ('rol,contraparte,concepto,monto,tasa,frecuencia,fecha_inicio,modo,pago\n'
+                     'prestamo,Marco,Auto,450000,22,mensual,2024-01-29,pago_fijo,13000\n'
+                     'deuda,Banco,Casa,500000,9,mensual,2025-01-01,pago_fijo,10000\n')
+        self._subir(contenido, tipo='prestamos')
+        self.client.post(reverse('prestamos:importar_confirmar'))
+        self.assertTrue(Prestamo.objects.filter(nombre_cliente='Marco', owner=self.user).exists())
+        deuda = Prestamo.objects.get(nombre_cliente='Banco')
+        self.assertTrue(deuda.es_deuda)
+        self.assertEqual(deuda.owner, self.user)
+
+    def test_alta_masiva_de_inversiones(self):
+        contenido = ('plataforma,nombre,tipo,monto,fecha_compra,tasa,plazo_dias\n'
+                     'cetesdirecto,CETES 28,descuento,50000,2026-07-20,9.75,28\n')
+        self._subir(contenido, tipo='inversiones')
+        self.client.post(reverse('prestamos:importar_confirmar'))
+        inv = Inversion.objects.get(nombre='CETES 28')
+        self.assertEqual(inv.owner, self.user)
+        self.assertEqual(inv.base_dias, 360)
+
+    def test_archivo_demasiado_grande(self):
+        grande = SimpleUploadedFile('p.csv', b'x' * (3 * 1024 * 1024))
+        r = self.client.post(reverse('prestamos:importar'), {
+            'tipo': 'movimientos_prestamo', 'destino_id': self.prestamo.pk, 'archivo': grande})
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.context.get('previsualizacion'))
+
+    def test_requiere_login(self):
+        self.client.logout()
+        r = self.client.get(reverse('prestamos:importar'))
+        self.assertEqual(r.status_code, 302)
+        self.assertIn('login', r.url)
+
+
+class ImportadorFormatosLocalesTests(TestCase):
+    """Dos fallos que sólo aparecen con archivos reales, no con los de laboratorio."""
+
+    def _csv(self, contenido):
+        return SimpleUploadedFile('d.csv', contenido.encode('utf-8'))
+
+    def test_coma_decimal_del_excel_en_espanol(self):
+        """'9,75' es 9.75, no 975. Quitar todas las comas creaba una tasa del 975%."""
+        self.assertEqual(a_decimal('9,75'), Decimal('9.75'))
+        self.assertEqual(a_decimal('10,5'), Decimal('10.50'))
+        self.assertEqual(a_decimal('1.234,56'), Decimal('1234.56'))
+
+    def test_coma_de_millar_en_formato_ingles(self):
+        self.assertEqual(a_decimal('$3,975.00'), Decimal('3975.00'))
+        self.assertEqual(a_decimal('1,234'), Decimal('1234.00'))
+
+    def test_encabezados_sinonimos(self):
+        """'Fecha de Pago' debe valer como 'fecha'."""
+        f = self._csv('Fecha de Pago,Importe,Tipo\n2025-04-18,3975,pago\n')
+        filas, _ = leer_tabla(f, 'd.csv')
+        validas, errores = procesar(filas, 'movimientos_prestamo')
+        self.assertEqual(errores, [])
+        self.assertEqual(validas[0]['fecha'], date(2025, 4, 18))
+        self.assertEqual(validas[0]['monto'], Decimal('3975.00'))
+
+    def test_la_columna_original_gana_sobre_el_alias(self):
+        f = self._csv('fecha,fecha_de_pago,monto,tipo\n2025-04-18,2020-01-01,100,pago\n')
+        filas, _ = leer_tabla(f, 'd.csv')
+        validas, _ = procesar(filas, 'movimientos_prestamo')
+        self.assertEqual(validas[0]['fecha'], date(2025, 4, 18))
+
+    def test_csv_espanol_completo(self):
+        """Separador ';', coma decimal y fecha DD/MM/AAAA a la vez."""
+        f = self._csv('plataforma;nombre;tipo;monto;fecha_compra;tasa;plazo_dias\n'
+                      'cetesdirecto;CETES 28;descuento;50.000,00;20/07/2026;9,75;28\n')
+        filas, _ = leer_tabla(f, 'd.csv')
+        validas, errores = procesar(filas, 'inversiones')
+        self.assertEqual(errores, [])
+        self.assertEqual(validas[0]['monto_invertido'], Decimal('50000.00'))
+        self.assertEqual(validas[0]['tasa_anual'], Decimal('9.75'))
+        self.assertEqual(validas[0]['fecha_compra'], date(2026, 7, 20))

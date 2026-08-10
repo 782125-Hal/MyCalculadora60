@@ -21,6 +21,8 @@ from .views import (
     borrar_inversion,
     editar_movimiento_inversion,
     borrar_movimiento_inversion,
+    importar,
+    importar_confirmar,
     export_prestamos_csv,
     export_prestamo_csv,
     export_prestamo_pdf,
@@ -52,6 +54,10 @@ urlpatterns = [
     path('portafolio/<int:pk>/borrar/', borrar_inversion, name='borrar_inversion'),
     path('portafolio/movimiento/<int:pk>/editar/', editar_movimiento_inversion, name='editar_movimiento_inversion'),
     path('portafolio/movimiento/<int:pk>/borrar/', borrar_movimiento_inversion, name='borrar_movimiento_inversion'),
+
+    # Importación desde CSV / Excel
+    path('importar/', importar, name='importar'),
+    path('importar/confirmar/', importar_confirmar, name='importar_confirmar'),
 
     # Exportaciones CSV (Fase 3)
     path('export/prestamos/', export_prestamos_csv, name='export_prestamos_csv'),

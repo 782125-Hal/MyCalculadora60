@@ -28,6 +28,7 @@ from .forms import (
     InversionForm,
     MovimientoInversionForm,
 )
+from .importador import IMPORTACIONES, leer_tabla, procesar
 from .calculator import (
     calculate_payment_for_term,
     calculate_term_for_payment,
@@ -1125,3 +1126,207 @@ def borrar_movimiento_inversion(request, pk):
         logger.exception("Error al borrar movimiento de inversión %s", pk)
         messages.error(request, "Ocurrió un error al eliminar el movimiento.")
     return redirect('prestamos:detalle_inversion', pk=inversion_id)
+
+
+# ============================================
+# Importación desde CSV / Excel
+#
+# Flujo en dos pasos: se parsea y valida el archivo, se muestra qué se va a
+# crear, y sólo al confirmar se escribe. Con cifras de dinero, un archivo mal
+# armado que entra directo a la base cuesta más de arreglar que de revisar.
+# ============================================
+
+MAX_BYTES_IMPORTACION = 2 * 1024 * 1024  # 2 MB: de sobra para 1000 filas
+
+
+def _destinos_disponibles(user):
+    return {
+        'prestamo': prestamos_visibles(user).order_by('nombre_cliente'),
+        'inversion': inversiones_visibles(user).order_by('nombre'),
+    }
+
+
+@login_required
+def importar(request):
+    """Paso 1: subir archivo y previsualizar."""
+    contexto = {
+        'importaciones': IMPORTACIONES,
+        'destinos': _destinos_disponibles(request.user),
+    }
+
+    if request.method != 'POST':
+        return render(request, 'prestamos/importar.html', contexto)
+
+    tipo = request.POST.get('tipo')
+    if tipo not in IMPORTACIONES:
+        messages.error(request, "Elige qué tipo de datos vas a importar.")
+        return render(request, 'prestamos/importar.html', contexto)
+
+    archivo = request.FILES.get('archivo')
+    if not archivo:
+        messages.error(request, "Adjunta un archivo .csv o .xlsx.")
+        return render(request, 'prestamos/importar.html', contexto)
+    if archivo.size > MAX_BYTES_IMPORTACION:
+        messages.error(request, "El archivo supera los 2 MB.")
+        return render(request, 'prestamos/importar.html', contexto)
+
+    # Destino: los movimientos cuelgan de un préstamo o de una inversión.
+    destino_tipo = IMPORTACIONES[tipo]['destino']
+    destino = None
+    if destino_tipo:
+        destino_id = request.POST.get('destino_id')
+        queryset = _destinos_disponibles(request.user)[destino_tipo]
+        destino = queryset.filter(pk=destino_id).first() if destino_id else None
+        if destino is None:
+            messages.error(request, "Elige a qué registro se van a cargar los movimientos.")
+            return render(request, 'prestamos/importar.html', contexto)
+
+    filas, error = leer_tabla(archivo, archivo.name)
+    if error:
+        messages.error(request, error)
+        return render(request, 'prestamos/importar.html', contexto)
+    if not filas:
+        messages.error(request, "El archivo no tiene filas con datos.")
+        return render(request, 'prestamos/importar.html', contexto)
+
+    validas, errores = procesar(filas, tipo)
+    duplicados = _marcar_duplicados(validas, tipo, destino)
+
+    # La vista previa viaja en sesión para no exigir subir el archivo dos veces.
+    request.session['importacion'] = {
+        'tipo': tipo,
+        'destino_id': destino.pk if destino else None,
+        'filas': [_serializar(f) for f in validas],
+    }
+
+    contexto.update({
+        'previsualizacion': True,
+        'tipo_elegido': tipo,
+        'destino': destino,
+        'validas': validas,
+        'errores': errores,
+        'duplicados': duplicados,
+        'nombre_archivo': archivo.name,
+    })
+    return render(request, 'prestamos/importar.html', contexto)
+
+
+def _serializar(fila):
+    """Deja la fila lista para la sesión (JSON no admite date ni Decimal)."""
+    salida = {}
+    for clave, valor in fila.items():
+        if isinstance(valor, date):
+            salida[clave] = valor.isoformat()
+        elif isinstance(valor, Decimal):
+            salida[clave] = str(valor)
+        else:
+            salida[clave] = valor
+    return salida
+
+
+def _marcar_duplicados(validas, tipo, destino):
+    """Fechas+monto que ya existen en el destino. No bloquea: sólo avisa."""
+    if not destino or tipo not in ('movimientos_prestamo', 'movimientos_inversion'):
+        return []
+    existentes = {(m.fecha, m.monto, m.tipo) for m in destino.movimientos.all()}
+    return [f['linea'] for f in validas
+            if (f['fecha'], f['monto'], f['tipo']) in existentes]
+
+
+@login_required
+def importar_confirmar(request):
+    """Paso 2: crear los registros previsualizados."""
+    if request.method != 'POST':
+        return redirect('prestamos:importar')
+
+    pendiente = request.session.get('importacion')
+    if not pendiente or not pendiente.get('filas'):
+        messages.error(request, "No hay nada que importar. Sube el archivo de nuevo.")
+        return redirect('prestamos:importar')
+
+    tipo = pendiente['tipo']
+    filas = pendiente['filas']
+    destino_tipo = IMPORTACIONES[tipo]['destino']
+
+    destino = None
+    if destino_tipo:
+        queryset = _destinos_disponibles(request.user)[destino_tipo]
+        destino = queryset.filter(pk=pendiente['destino_id']).first()
+        if destino is None:
+            messages.error(request, "El registro de destino ya no está disponible.")
+            return redirect('prestamos:importar')
+
+    try:
+        with transaction.atomic():
+            creados = _crear_registros(request.user, tipo, filas, destino)
+            registrar_auditoria(request.user, 'crear', 'Importacion', None,
+                                f"{tipo}: {creados} registros")
+    except Exception:
+        logger.exception("Error al importar (%s, user=%s)", tipo, request.user.pk)
+        messages.error(request, "Ocurrió un error al importar. No se guardó nada.")
+        return redirect('prestamos:importar')
+
+    request.session.pop('importacion', None)
+    messages.success(request, f"Se importaron {creados} registros.")
+
+    if destino_tipo == 'prestamo':
+        return redirect('prestamos:detalle_prestamo', pk=destino.pk)
+    if destino_tipo == 'inversion':
+        return redirect('prestamos:detalle_inversion', pk=destino.pk)
+    if tipo == 'inversiones':
+        return redirect('prestamos:portafolio')
+    return redirect('prestamos:lista_prestamos')
+
+
+def _crear_registros(user, tipo, filas, destino):
+    """Crea en bloque. Todo dentro de la transacción de quien llama."""
+    if tipo == 'movimientos_prestamo':
+        Movimiento.objects.bulk_create([
+            Movimiento(prestamo=destino, fecha=date.fromisoformat(f['fecha']),
+                       monto=Decimal(f['monto']), tipo=f['tipo'],
+                       descripcion=f.get('descripcion', ''))
+            for f in filas
+        ])
+        destino.actualizar_saldo(timezone.now().date())
+        return len(filas)
+
+    if tipo == 'movimientos_inversion':
+        MovimientoInversion.objects.bulk_create([
+            MovimientoInversion(inversion=destino, fecha=date.fromisoformat(f['fecha']),
+                                monto=Decimal(f['monto']), tipo=f['tipo'],
+                                descripcion=f.get('descripcion', ''))
+            for f in filas
+        ])
+        return len(filas)
+
+    if tipo == 'prestamos':
+        for f in filas:
+            cliente = Cliente.objects.create(owner=user, nombre=f['nombre_cliente'],
+                                             telefono=f.get('telefono', ''))
+            Prestamo.objects.create(
+                owner=user, cliente=cliente, rol=f['rol'], concepto=f.get('concepto', ''),
+                nombre_cliente=f['nombre_cliente'], telefono=f.get('telefono', ''),
+                monto_original=Decimal(f['monto_original']),
+                tasa_interes_anual=Decimal(f['tasa_interes_anual']),
+                tipo_pago=f['tipo_pago'], fecha_inicio=date.fromisoformat(f['fecha_inicio']),
+                modo=f['modo'],
+                plazo_meses=f['plazo_meses'],
+                pago_mensual=Decimal(f['pago_mensual']) if f['pago_mensual'] else None,
+                saldo_actual=Decimal(f['monto_original']),
+            )
+        return len(filas)
+
+    if tipo == 'inversiones':
+        Inversion.objects.bulk_create([
+            Inversion(owner=user, plataforma=f['plataforma'], nombre=f['nombre'],
+                      tipo=f['tipo'], monto_invertido=Decimal(f['monto_invertido']),
+                      fecha_compra=date.fromisoformat(f['fecha_compra']),
+                      tasa_anual=Decimal(f['tasa_anual']), plazo_dias=f['plazo_dias'],
+                      base_dias=f['base_dias'],
+                      valor_manual=Decimal(f['valor_manual']) if f['valor_manual'] else None,
+                      notas=f.get('notas', ''))
+            for f in filas
+        ])
+        return len(filas)
+
+    return 0

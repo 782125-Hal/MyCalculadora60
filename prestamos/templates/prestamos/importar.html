@@ -1,0 +1,175 @@
+{% extends 'base.html' %}
+
+{% block title %}Importar datos{% endblock %}
+
+{% block content %}
+<h2 class="mb-1">Importar desde Excel o CSV</h2>
+<p class="text-muted">
+    Nada se guarda hasta que revises la vista previa y confirmes.
+</p>
+
+{% if not previsualizacion %}
+    <form method="post" enctype="multipart/form-data" class="card card-body bg-light" style="max-width: 820px;">
+        {% csrf_token %}
+
+        <div class="mb-3">
+            <label for="tipo" class="form-label">¿Qué vas a importar?</label>
+            <select name="tipo" id="tipo" class="form-select" required>
+                <option value="">— Elige —</option>
+                {% for clave, cfg in importaciones.items %}
+                    <option value="{{ clave }}" data-destino="{{ cfg.destino|default:'' }}">{{ cfg.etiqueta }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="mb-3 d-none" id="bloque_prestamo">
+            <label for="destino_prestamo" class="form-label">¿A qué préstamo o deuda?</label>
+            <select name="destino_id" id="destino_prestamo" class="form-select" disabled>
+                {% for p in destinos.prestamo %}
+                    <option value="{{ p.pk }}">#{{ p.pk }} · {{ p.nombre_cliente }}{% if p.concepto %} — {{ p.concepto }}{% endif %}</option>
+                {% empty %}
+                    <option value="">No tienes préstamos registrados</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="mb-3 d-none" id="bloque_inversion">
+            <label for="destino_inversion" class="form-label">¿A qué posición del portafolio?</label>
+            <select name="destino_id" id="destino_inversion" class="form-select" disabled>
+                {% for i in destinos.inversion %}
+                    <option value="{{ i.pk }}">#{{ i.pk }} · {{ i.nombre }} ({{ i.get_plataforma_display }})</option>
+                {% empty %}
+                    <option value="">No tienes inversiones registradas</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="mb-3">
+            <label for="archivo" class="form-label">Archivo</label>
+            <input type="file" name="archivo" id="archivo" class="form-control"
+                   accept=".csv,.xlsx,.xlsm,.txt" required>
+            <div class="form-text">.csv o .xlsx, hasta 2 MB y 1000 filas.</div>
+        </div>
+
+        <div>
+            <button type="submit" class="btn btn-primary">Revisar archivo</button>
+        </div>
+    </form>
+
+    <h5 class="mt-4">Columnas que espera cada tipo</h5>
+    <div class="table-responsive">
+        <table class="table table-sm">
+            <thead><tr><th>Tipo</th><th>Columnas</th><th>Ejemplo</th></tr></thead>
+            <tbody>
+            {% for clave, cfg in importaciones.items %}
+                <tr>
+                    <td class="text-nowrap">{{ cfg.etiqueta }}</td>
+                    <td class="small">{{ cfg.columnas }}</td>
+                    <td><pre class="small mb-0" style="white-space: pre-wrap;">{{ cfg.ejemplo }}</pre></td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <p class="text-muted small">
+        Los encabezados no distinguen mayúsculas ni acentos: «Fecha de Pago», «fecha_pago» y
+        «FECHA PAGO» valen igual. Las fechas admiten AAAA-MM-DD o DD/MM/AAAA, y los montos
+        toleran «$» y comas de millar.
+    </p>
+
+    <script>
+        // Sólo los movimientos necesitan destino; las altas masivas, no.
+        var tipo = document.getElementById('tipo');
+        var bloques = {
+            prestamo: document.getElementById('bloque_prestamo'),
+            inversion: document.getElementById('bloque_inversion'),
+        };
+        tipo.addEventListener('change', function () {
+            var destino = tipo.options[tipo.selectedIndex].dataset.destino || '';
+            Object.keys(bloques).forEach(function (clave) {
+                var visible = clave === destino;
+                bloques[clave].classList.toggle('d-none', !visible);
+                // Deshabilitar el select oculto evita mandar dos destino_id.
+                bloques[clave].querySelector('select').disabled = !visible;
+            });
+        });
+    </script>
+
+{% else %}
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <h5 class="card-title">Vista previa — {{ nombre_archivo }}</h5>
+            <p class="mb-1">
+                <strong>{{ validas|length }}</strong> fila(s) listas para importar
+                {% if destino %}en <strong>{{ destino }}</strong>{% endif %}.
+            </p>
+            {% if errores %}
+                <p class="mb-1 text-danger">
+                    <strong>{{ errores|length }}</strong> fila(s) se van a omitir por errores.
+                </p>
+            {% endif %}
+            {% if duplicados %}
+                <p class="mb-0 text-warning-emphasis">
+                    <strong>{{ duplicados|length }}</strong> fila(s) coinciden en fecha, monto y tipo
+                    con movimientos que ya existen. Se importarán igualmente: revísalas si no
+                    esperabas repetidos.
+                </p>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if errores %}
+        <div class="card mb-3 border-danger">
+            <div class="card-header text-danger">Filas con errores (no se importarán)</div>
+            <div class="table-responsive">
+                <table class="table table-sm mb-0">
+                    <thead><tr><th>Línea</th><th>Motivo</th></tr></thead>
+                    <tbody>
+                    {% for e in errores %}
+                        <tr><td>{{ e.linea }}</td><td>{{ e.motivo }}</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    {% endif %}
+
+    {% if validas %}
+        <div class="table-responsive mb-3" style="max-height: 420px; overflow-y: auto;">
+            <table class="table table-sm table-striped">
+                <thead class="table-light">
+                    <tr>
+                        <th>Línea</th>
+                        {% for campo in validas.0.keys %}
+                            {% if campo != 'linea' %}<th>{{ campo }}</th>{% endif %}
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                {% for fila in validas %}
+                    <tr {% if fila.linea in duplicados %}class="table-warning"{% endif %}>
+                        <td>{{ fila.linea }}</td>
+                        {% for campo, valor in fila.items %}
+                            {% if campo != 'linea' %}<td>{{ valor|default_if_none:"—" }}</td>{% endif %}
+                        {% endfor %}
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <form method="post" action="{% url 'prestamos:importar_confirmar' %}" class="d-inline">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-success">
+                Confirmar e importar {{ validas|length }} registro(s)
+            </button>
+        </form>
+    {% else %}
+        <div class="alert alert-danger">Ninguna fila del archivo es válida. Corrige los errores y vuelve a subirlo.</div>
+    {% endif %}
+
+    <a href="{% url 'prestamos:importar' %}" class="btn btn-outline-secondary">Cancelar</a>
+
+{% endif %}
+{% endblock %}
