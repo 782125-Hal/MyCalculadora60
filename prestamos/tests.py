@@ -1920,3 +1920,136 @@ class AportacionesEnElValorTests(TestCase):
         r = self.client.get(reverse('prestamos:portafolio'))
         self.assertEqual(r.context['total_invertido'], Decimal('15987.85'))
         self.assertEqual(r.context['total_valor'], Decimal('15987.85'))
+
+
+# ============================================================
+# Editar los pagos que faltan desde el botón "Editar"
+# ============================================================
+
+class PagosRestantesTest(TestCase):
+    """El plazo se captura como "cuántos pagos me faltan", no como plazo total.
+
+    La traducción vive en la vista (`editar_prestamo`) y se apoya en
+    `Prestamo.periodos_transcurridos()`.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='plazo_tester', password='pw')
+        self.client.login(username='plazo_tester', password='pw')
+
+    def _prestamo(self, **kwargs):
+        datos = dict(
+            owner=self.user,
+            nombre_cliente='Deudor',
+            monto_original=Decimal('120000.00'),
+            tasa_interes_anual=Decimal('12.00'),
+            tipo_pago='mensual',
+            fecha_inicio=date.today() - relativedelta(months=10),
+            modo='fixed_term',
+            plazo_meses=60,
+            pago_mensual=Decimal('2669.34'),
+        )
+        datos.update(kwargs)
+        return Prestamo.objects.create(**datos)
+
+    def _post(self, prestamo, **extra):
+        datos = {
+            'monto_original': str(prestamo.monto_original),
+            'tasa_interes_anual': str(prestamo.tasa_interes_anual),
+            'tipo_pago': prestamo.tipo_pago,
+        }
+        datos.update(extra)
+        return self.client.post(
+            reverse('prestamos:editar_prestamo', args=[prestamo.pk]), datos)
+
+    def test_periodos_transcurridos_cuenta_periodos_vencidos(self):
+        p = self._prestamo()
+        self.assertEqual(p.periodos_transcurridos(), 10)
+
+    def test_periodos_transcurridos_semanal(self):
+        p = self._prestamo(tipo_pago='semanal',
+                           fecha_inicio=date.today() - timedelta(weeks=7))
+        self.assertEqual(p.periodos_transcurridos(), 7)
+
+    def test_prestamo_futuro_no_tiene_periodos_vencidos(self):
+        p = self._prestamo(fecha_inicio=date.today() + relativedelta(months=1))
+        self.assertEqual(p.periodos_transcurridos(), 0)
+        self.assertEqual(p.pagos_restantes, 60)
+
+    def test_pagos_restantes_descuenta_lo_ya_vencido(self):
+        self.assertEqual(self._prestamo().pagos_restantes, 50)
+
+    def test_pagos_restantes_no_baja_de_cero(self):
+        p = self._prestamo(plazo_meses=3)
+        self.assertEqual(p.pagos_restantes, 0)
+
+    def test_sin_plazo_los_pagos_restantes_son_desconocidos(self):
+        p = self._prestamo(plazo_meses=None, modo='fixed_payment')
+        self.assertIsNone(p.pagos_restantes)
+
+    def test_editar_pagos_restantes_ajusta_el_plazo_total(self):
+        p = self._prestamo()
+        self._post(p, pagos_restantes='24')
+        p.refresh_from_db()
+        # 10 períodos ya vencidos + 24 que faltan
+        self.assertEqual(p.plazo_meses, 34)
+        self.assertEqual(p.pagos_restantes, 24)
+
+    def test_en_plazo_fijo_la_cuota_se_recalcula(self):
+        p = self._prestamo()
+        self._post(p, pagos_restantes='24')
+        p.refresh_from_db()
+        self.assertEqual(
+            p.pago_mensual,
+            calculate_payment_for_term(p.monto_original, p.tasa_interes_anual,
+                                       34, 'mensual'))
+
+    def test_en_pago_fijo_la_cuota_no_se_toca(self):
+        p = self._prestamo(modo='fixed_payment', pago_mensual=Decimal('3000.00'))
+        self._post(p, pagos_restantes='12')
+        p.refresh_from_db()
+        self.assertEqual(p.plazo_meses, 22)
+        self.assertEqual(p.pago_mensual, Decimal('3000.00'))
+
+    def test_campo_vacio_deja_el_plazo_intacto(self):
+        p = self._prestamo()
+        self._post(p, pagos_restantes='')
+        p.refresh_from_db()
+        self.assertEqual(p.plazo_meses, 60)
+        self.assertEqual(p.pago_mensual, Decimal('2669.34'))
+
+    def test_cero_pagos_restantes_cierra_el_plazo_en_lo_ya_vencido(self):
+        p = self._prestamo()
+        self._post(p, pagos_restantes='0')
+        p.refresh_from_db()
+        self.assertEqual(p.plazo_meses, 10)
+        self.assertEqual(p.pagos_restantes, 0)
+
+    def test_valor_negativo_no_guarda_nada(self):
+        p = self._prestamo()
+        self._post(p, pagos_restantes='-3')
+        p.refresh_from_db()
+        self.assertEqual(p.plazo_meses, 60)
+
+    def test_el_formulario_de_edicion_prellena_los_pagos_que_faltan(self):
+        p = self._prestamo()
+        html = self.client.get(
+            reverse('prestamos:editar_prestamo', args=[p.pk])).content.decode()
+        self.assertIn('name="pagos_restantes"', html)
+        self.assertIn('value="50"', html)
+
+    def test_el_detalle_muestra_los_pagos_que_faltan(self):
+        p = self._prestamo()
+        html = self.client.get(
+            reverse('prestamos:detalle_prestamo', args=[p.pk])).content.decode()
+        self.assertIn('Pagos que faltan', html)
+
+    def test_al_cambiar_a_semanal_los_periodos_vencidos_se_recuentan(self):
+        # 10 meses ≈ 43-44 semanas: el plazo total debe usar la frecuencia NUEVA,
+        # no la que tenía el préstamo antes de guardar.
+        p = self._prestamo()
+        self._post(p, tipo_pago='semanal', pagos_restantes='10')
+        p.refresh_from_db()
+        semanas = p.periodos_transcurridos()
+        self.assertGreater(semanas, 40)
+        self.assertEqual(p.plazo_meses, semanas + 10)

@@ -46,6 +46,8 @@
                {% if prestamo.pago_mensual %}${{ prestamo.pago_mensual|floatformat:2 }}{% else %}—{% endif %}</p>
             <p><strong>Plazo:</strong>
                {% if prestamo.plazo_meses %}{{ prestamo.plazo_meses }} períodos{% else %}—{% endif %}</p>
+            <p><strong>Pagos que faltan:</strong>
+               {{ prestamo.pagos_restantes|default_if_none:"—" }}</p>
         </div>
     </div>
 

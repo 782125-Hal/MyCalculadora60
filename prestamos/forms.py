@@ -209,6 +209,18 @@ class PrestamoEditForm(forms.Form):
         label='Frecuencia de Pago',
         choices=[('mensual', 'Mensual'), ('semanal', 'Semanal')],
     )
+    # El usuario razona en "cuántos pagos me faltan", no en "cuál es el plazo
+    # total desde la fecha de inicio". La vista traduce este número a
+    # plazo_meses sumándole los períodos ya vencidos. Vacío = no tocar el plazo,
+    # para que quien sólo venga a corregir la tasa no lo borre sin querer.
+    pagos_restantes = forms.IntegerField(
+        label='Pagos que faltan',
+        required=False,
+        min_value=0,
+        max_value=10000,
+        help_text='Cuántos pagos quedan pendientes a partir de hoy. '
+                  'Déjalo vacío para no modificar el plazo.',
+    )
 
     def clean(self):
         cleaned = super().clean()

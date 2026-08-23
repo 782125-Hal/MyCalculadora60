@@ -238,6 +238,42 @@ class Prestamo(models.Model):
             super().save()
         return self.saldo_actual
 
+    def periodos_transcurridos(self, fecha_actual=None):
+        """Cuántos períodos completos ya vencieron desde `fecha_inicio`.
+
+        Avanza el cursor período a período (igual que `actualizar_saldo`) en vez
+        de dividir días entre 30: con relativedelta un préstamo mensual vence
+        siempre el mismo día del mes, y la división daría un período de más o de
+        menos según la longitud de los meses del camino.
+        """
+        if fecha_actual is None:
+            fecha_actual = datetime.date.today()
+        if fecha_actual <= self.fecha_inicio:
+            return 0
+
+        from .calculator import get_period_rate_and_delta
+        delta, _ = get_period_rate_and_delta(self.tasa_interes_anual, self.tipo_pago)
+
+        transcurridos = 0
+        cursor = self.fecha_inicio + delta
+        # Tope de seguridad: 200 años de períodos semanales. Sin él, una
+        # fecha_inicio corrupta (año 0001) colgaría la vista.
+        while cursor <= fecha_actual and transcurridos < 10400:
+            transcurridos += 1
+            cursor += delta
+        return transcurridos
+
+    @property
+    def pagos_restantes(self):
+        """Pagos que faltan a partir de hoy según el plazo pactado.
+
+        None cuando el préstamo no tiene plazo (modo pago fijo sin plazo
+        calculado): no es lo mismo "no faltan pagos" que "no se sabe".
+        """
+        if not self.plazo_meses:
+            return None
+        return max(self.plazo_meses - self.periodos_transcurridos(), 0)
+
     def get_amortizacion(self):
         """Delegates to the centralized pure calculator (see prestamos/calculator.py)."""
         from .calculator import build_amortization_schedule

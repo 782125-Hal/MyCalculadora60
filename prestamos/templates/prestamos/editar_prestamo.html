@@ -39,6 +39,26 @@
                     </select>
                 </div>
 
+                <div class="mb-3">
+                    <label for="pagos_restantes" class="form-label fw-bold">Pagos que faltan</label>
+                    <input type="number" step="1" min="0" name="pagos_restantes"
+                           id="pagos_restantes" class="form-control"
+                           value="{{ prestamo.pagos_restantes|default_if_none:'' }}"
+                           placeholder="Sin plazo definido">
+                    <div class="form-text">
+                        Cuántos pagos quedan pendientes a partir de hoy.
+                        {% if prestamo.plazo_meses %}
+                            Plazo actual: {{ prestamo.plazo_meses }} períodos,
+                            de los que ya vencieron {{ periodos_transcurridos }}.
+                        {% endif %}
+                        Déjalo vacío para no modificar el plazo.
+                        {% if prestamo.modo == 'fixed_payment' %}
+                            <br>Este préstamo es de <strong>pago fijo</strong>: cambiar los pagos
+                            que faltan ajusta el plazo, pero no altera el monto de la cuota.
+                        {% endif %}
+                    </div>
+                </div>
+
                 <div class="d-flex gap-2">
                     <button type="submit" class="btn btn-primary">Guardar Cambios</button>
                     <a href="{% url 'prestamos:detalle_prestamo' prestamo.id %}"

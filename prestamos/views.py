@@ -539,11 +539,37 @@ def editar_prestamo(request, prestamo_id):
                     prestamo.monto_original = form.cleaned_data['monto_original']
                     prestamo.tasa_interes_anual = form.cleaned_data['tasa_interes_anual']
                     prestamo.tipo_pago = form.cleaned_data['tipo_pago']
+
+                    # El usuario captura los pagos que le faltan; el modelo guarda
+                    # el plazo total desde fecha_inicio. La traducción se hace
+                    # DESPUÉS de fijar tipo_pago porque los períodos ya vencidos
+                    # dependen de la frecuencia (52 semanales ≠ 12 mensuales al año).
+                    detalle_plazo = ''
+                    pagos_restantes = form.cleaned_data.get('pagos_restantes')
+                    if pagos_restantes is not None:
+                        prestamo.plazo_meses = (
+                            prestamo.periodos_transcurridos() + pagos_restantes
+                        )
+                        # En modo Plazo Fijo la cuota se deriva del plazo (misma
+                        # regla que al dar de alta el préstamo): si cambian los
+                        # pagos que faltan sin recalcularla, la tabla mostraría
+                        # una mensualidad que ya no liquida en ese plazo.
+                        # En modo Pago Fijo la cuota es el dato pactado y no se toca.
+                        if prestamo.modo == 'fixed_term' and prestamo.plazo_meses > 0:
+                            prestamo.pago_mensual = calculate_payment_for_term(
+                                prestamo.monto_original,
+                                prestamo.tasa_interes_anual,
+                                prestamo.plazo_meses,
+                                prestamo.tipo_pago,
+                            )
+                        detalle_plazo = f" · faltan {pagos_restantes} pagos"
+
                     prestamo.saldo_actual = prestamo.monto_original  # Reset
                     prestamo.save()
                     prestamo.actualizar_saldo()
                     registrar_auditoria(request.user, 'editar', 'Prestamo', prestamo.pk,
-                                        f"monto ${prestamo.monto_original} · tasa {prestamo.tasa_interes_anual}%")
+                                        f"monto ${prestamo.monto_original} · "
+                                        f"tasa {prestamo.tasa_interes_anual}%{detalle_plazo}")
                     messages.success(request, "Préstamo actualizado exitosamente.")
                     return redirect('prestamos:detalle_prestamo', pk=prestamo_id)
             except Exception:
@@ -555,7 +581,10 @@ def editar_prestamo(request, prestamo_id):
                     messages.error(request, f"{field}: {error}")
     # (No inicializamos el form en GET porque el template actual usa el objeto prestamo directamente)
 
-    return render(request, 'prestamos/editar_prestamo.html', {'prestamo': prestamo})
+    return render(request, 'prestamos/editar_prestamo.html', {
+        'prestamo': prestamo,
+        'periodos_transcurridos': prestamo.periodos_transcurridos(),
+    })
 
 @login_required
 def delete_prestamo(request, prestamo_id):
