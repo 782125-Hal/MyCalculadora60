@@ -1,4 +1,4 @@
-# MyCalculadora60 — Gestión de Préstamos
+# MyC60 — Gestión de Préstamos
 
 Aplicación web desarrollada con **Django 5** y **Django REST Framework** para gestionar préstamos personales: registro de clientes, cálculo de amortización, seguimiento de pagos e incrementos de capital.
 
@@ -145,6 +145,26 @@ Ver [.env.example](.env.example) para las variables que debes configurar.
 5. Railway despliega automáticamente al hacer `git push`
 
 El `Procfile` ejecuta las migraciones y levanta el servidor automáticamente en cada deploy.
+
+### Dominio propio
+
+La app se sirve en **https://myc60.hlarreta.com** (dominio personalizado de Railway).
+El dominio interno `mycalculadora60-production.up.railway.app` sigue funcionando.
+
+El DNS de `hlarreta.com` lo administra el hosting (nameservers `*.mysecurecloudhost.com`),
+no Railway, así que el registro CNAME se crea en el panel del hosting:
+
+| Tipo | Nombre | Valor |
+|---|---|---|
+| CNAME | `myc60` | el destino que Railway muestra al agregar el dominio |
+
+Railway emite el certificado TLS solo, en cuanto el CNAME resuelve.
+
+Al agregar el dominio hay que sumarlo también a las variables de entorno del
+servicio, o Django rechaza las peticiones:
+
+- `ALLOWED_HOSTS` → `myc60.hlarreta.com,mycalculadora60-production.up.railway.app`
+- `CSRF_TRUSTED_ORIGINS` → `https://myc60.hlarreta.com,https://mycalculadora60-production.up.railway.app`
 
 ### Cierre automático de períodos (cron)
 
