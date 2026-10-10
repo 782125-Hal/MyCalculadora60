@@ -89,6 +89,17 @@ class Prestamo(models.Model):
         choices=[('fixed_term', 'Fixed Term'), ('fixed_payment', 'Fixed Payment')],
         default='fixed_payment'
     )
+    capitalizar_intereses = models.BooleanField(
+        default=False,
+        verbose_name='Capitalizar intereses no pagados',
+        help_text=(
+            'Si está activo, el interés que no se paga se acumula a la base del '
+            'período siguiente (interés compuesto) y los pagos liquidan primero '
+            'los intereses devengados y después la cuota. Apagado, cada período '
+            'devenga sólo sobre la cuota no cubierta.'
+        ),
+    )
+
     def __str__(self):
         etiqueta = 'Deuda con' if self.es_deuda else 'Préstamo de'
         if self.concepto:
@@ -158,6 +169,17 @@ class Prestamo(models.Model):
             num_mov = len(movimientos)
             pago_minimo = self.pago_mensual or Decimal('0')
 
+            # Cuotas de períodos ya vencidos que siguen sin cubrirse. Un pago
+            # salda primero este adeudo y sólo el excedente acredita el período
+            # en curso: quien paga el día 31 está liquidando el corte del 28 que
+            # ya venció, no adelantando el corte siguiente.
+            adeudo_vencido = Decimal('0')
+
+            # Intereses ya devengados que siguen sin pagarse. Sólo se usan
+            # cuando `capitalizar_intereses` está activo: son la base extra que
+            # se suma al siguiente período y lo primero que liquida un pago.
+            intereses_pendientes = Decimal('0')
+
             # 0) Movimientos con fecha anterior o igual al inicio del préstamo.
             # Se aplican al balance pero no pertenecen a ningún período. Sin este
             # consumo previo el cursor se quedaba atascado en ellos —la condición
@@ -190,26 +212,64 @@ class Prestamo(models.Model):
                         balance += mov.monto
                     mov_index += 1
 
+                # Un pago liquida primero las cuotas vencidas y sólo lo que
+                # sobra acredita el período en curso. Sin esta imputación, un
+                # pago hecho pocos días DESPUÉS del corte caía por fecha en la
+                # ventana siguiente y la daba por cubierta, de modo que el
+                # período que realmente quedó sin pago nunca devengaba interés.
+                disponible = suma_pagos_periodo
+
+                # Con capitalización el pago sigue la cascada estándar del
+                # crédito: liquida primero los intereses devengados, después las
+                # cuotas vencidas, y sólo el remanente acredita el período en
+                # curso. Sin ella el interés nunca se "cobra" por separado, así
+                # que el pago entero va contra cuotas (comportamiento histórico).
+                if self.capitalizar_intereses:
+                    abono_intereses = min(disponible, intereses_pendientes)
+                    intereses_pendientes -= abono_intereses
+                    disponible -= abono_intereses
+
+                abono_a_vencido = min(disponible, adeudo_vencido)
+                adeudo_vencido -= abono_a_vencido
+                acredita_periodo = disponible - abono_a_vencido
+
                 # Interés sobre el faltante del período, no sobre la mensualidad
                 # entera: si la cuota es 3,975 y se abonaron 3,000, el interés
                 # corre sólo sobre los 975 restantes. Se suma al capital.
                 # pago_minimo 0 (pago_mensual None/0) => faltante <= 0 => nunca cobra.
                 if fecha_esperada <= fecha_actual:
-                    faltante = pago_minimo - suma_pagos_periodo
-                    intereses = quantize_money(faltante * tasa_periodo) if faltante > 0 else Decimal('0.00')
+                    faltante = pago_minimo - acredita_periodo
+                    base = Decimal('0.00')
+                    if faltante > 0:
+                        adeudo_vencido += faltante
+                        # La base compuesta arrastra los intereses que siguen sin
+                        # pagarse, de modo que cada período devenga sobre la cuota
+                        # faltante MÁS lo ya acumulado.
+                        base = faltante + intereses_pendientes if self.capitalizar_intereses else faltante
+                    intereses = quantize_money(base * tasa_periodo) if base > 0 else Decimal('0.00')
                     # Un cargo de 0 no aporta información y ensucia el historial:
                     # ocurre con tasa 0% o cuando el faltante redondea por debajo
                     # del centavo.
                     if intereses > 0:
                         balance += intereses
+                        if self.capitalizar_intereses:
+                            acumulado = (base - faltante).quantize(Decimal('0.01'))
+                            descripcion = (
+                                f'Interés sobre {base.quantize(Decimal("0.01"))} '
+                                f'(cuota {faltante.quantize(Decimal("0.01"))} '
+                                f'+ intereses acumulados {acumulado})'
+                            )
+                            intereses_pendientes += intereses
+                        else:
+                            descripcion = (
+                                f'Interés sobre {faltante.quantize(Decimal("0.01"))} no cubierto'
+                            )
                         Movimiento.objects.create(
                             prestamo=self,
                             fecha=fecha_esperada,
                             monto=intereses,
                             tipo='interes_cargo',
-                            descripcion=(
-                                f'Interés sobre {faltante.quantize(Decimal("0.01"))} no cubierto'
-                            ),
+                            descripcion=descripcion,
                         )
 
                 fecha_periodo_start = fecha_esperada

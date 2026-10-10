@@ -2053,3 +2053,261 @@ class PagosRestantesTest(TestCase):
         semanas = p.periodos_transcurridos()
         self.assertGreater(semanas, 40)
         self.assertEqual(p.plazo_meses, semanas + 10)
+
+
+class PrestamoMarcoMarquezRealTest(TestCase):
+    """Caso real: préstamo #10 "Marco Marquez", datos extraídos de producción
+    el 9 oct 2026.
+
+    Sirve de ancla contra regresiones porque es un historial auténtico, con
+    pagos que caen unos días antes o después del corte, un fallo genuino en
+    agosto 2025 y un pago tardío tres días después del corte de agosto 2026.
+
+    LÍNEA BASE DE PRODUCCIÓN (código previo a esta rama): 6 cargos de 238.33
+    —28 ago 2025, 28 dic 2025, 28 abr 2026, 28 jun, 28 jul y 28 ago 2026— y
+    saldo 87,429.98, que cuadra exactamente con
+    450,000 − 28 × 13,000 + 6 × 238.33.
+
+    Ese resultado ocultaba el atraso: al corte del 28 sep 2026 habían vencido
+    32 períodos y Marco había hecho 27 pagos, o sea cinco cuotas (65,000) de
+    atraso. Como cada pago tardío "reiniciaba el reloj", sólo devengaban los
+    meses sin ningún depósito.
+    """
+
+    CUOTA = Decimal('13000.00')
+    CARGO = Decimal('238.33')              # 13,000 × (22 % / 12)
+    HOY = date(2026, 10, 9)
+
+    PARAMS = dict(
+        monto_original=Decimal('450000.00'),
+        tasa_interes_anual=Decimal('22.00'),
+        tipo_pago='mensual',
+        modo='fixed_payment',
+        fecha_inicio=date(2024, 1, 29),
+        pago_mensual=Decimal('13000.00'),
+        plazo_meses=51,
+    )
+
+    # Los 28 pagos tal como están en producción.
+    PAGOS = [
+        date(2024, 2, 25), date(2024, 3, 25), date(2024, 4, 27), date(2024, 5, 25),
+        date(2024, 6, 28), date(2024, 7, 17), date(2024, 8, 21), date(2024, 9, 28),
+        date(2024, 10, 24), date(2024, 11, 26), date(2024, 12, 25),
+        date(2025, 1, 24), date(2025, 2, 25), date(2025, 3, 28), date(2025, 4, 23),
+        date(2025, 5, 23), date(2025, 6, 25), date(2025, 7, 25), date(2025, 9, 1),
+        date(2025, 10, 28), date(2025, 11, 25),
+        date(2026, 1, 27), date(2026, 2, 24), date(2026, 3, 24), date(2026, 4, 29),
+        date(2026, 5, 25), date(2026, 8, 31), date(2026, 10, 9),
+    ]
+
+    # Los 6 cargos que generaba el código anterior.
+    CARGOS_PRODUCCION = [
+        date(2025, 8, 28), date(2025, 12, 28), date(2026, 4, 28),
+        date(2026, 6, 28), date(2026, 7, 28), date(2026, 8, 28),
+    ]
+
+    def _prestamo(self, capitalizar=False):
+        p = Prestamo.objects.create(
+            nombre_cliente='Marco Marquez', capitalizar_intereses=capitalizar,
+            **self.PARAMS)
+        for f in self.PAGOS:
+            Movimiento.objects.create(
+                prestamo=p, fecha=f, monto=self.CUOTA, tipo='pago')
+        p.actualizar_saldo(self.HOY)
+        return p
+
+    def _cargos(self, p):
+        return [(m.fecha, m.monto) for m in
+                p.movimientos.filter(tipo='interes_cargo').order_by('fecha')]
+
+    def test_el_historial_de_entrada_es_el_de_produccion(self):
+        """Guarda: 28 pagos de 13,000. Si alguien toca la lista, el resto miente."""
+        self.assertEqual(len(self.PAGOS), 28)
+        self.assertEqual(sorted(self.PAGOS), self.PAGOS)
+
+    def test_tabla_de_cargos_completa(self):
+        """Un cargo por cada corte sin cubrir, incluidos los ocho que faltaban."""
+        p = self._prestamo()
+        self.assertEqual(self._cargos(p), [
+            (date(2025, 8, 28), self.CARGO),   # fallo genuino: sin pago 28jul-28ago
+            (date(2025, 9, 28), self.CARGO),   # el pago del 1 sep salda agosto
+            (date(2025, 10, 28), self.CARGO),
+            (date(2025, 11, 28), self.CARGO),
+            (date(2025, 12, 28), self.CARGO),
+            (date(2026, 1, 28), self.CARGO),
+            (date(2026, 2, 28), self.CARGO),
+            (date(2026, 3, 28), self.CARGO),
+            (date(2026, 4, 28), self.CARGO),
+            (date(2026, 5, 28), self.CARGO),
+            (date(2026, 6, 28), self.CARGO),
+            (date(2026, 7, 28), self.CARGO),
+            (date(2026, 8, 28), self.CARGO),
+            (date(2026, 9, 28), self.CARGO),   # el bug reportado
+        ])
+
+    def test_el_cargo_de_septiembre_2026_existe(self):
+        """El síntoma que originó el cambio: faltaba justo este."""
+        p = self._prestamo()
+        self.assertIn(date(2026, 9, 28), [f for f, _ in self._cargos(p)])
+
+    def test_conserva_los_seis_cargos_que_ya_existian(self):
+        """Ninguno de los cargos de producción desaparece: sólo se agregan."""
+        generados = {f for f, _ in self._cargos(self._prestamo())}
+        self.assertTrue(set(self.CARGOS_PRODUCCION).issubset(generados))
+
+    def test_saldo_resultante(self):
+        """450,000 − 28 × 13,000 + 14 × 238.33 = 89,336.62 (producción: 87,429.98)."""
+        p = self._prestamo()
+        esperado = (self.PARAMS['monto_original']
+                    - len(self.PAGOS) * self.CUOTA
+                    + 14 * self.CARGO)
+        self.assertEqual(esperado, Decimal('89336.62'))
+        self.assertEqual(p.saldo_actual, Decimal('89336.62'))
+
+    def test_con_capitalizacion_las_rachas_sin_pago_componen(self):
+        """Mismos 14 cortes; sólo sube la base cuando hay interés sin pagar."""
+        p = self._prestamo(capitalizar=True)
+        cargos = self._cargos(p)
+        self.assertEqual([f for f, _ in cargos],
+                         [f for f, _ in self._cargos(self._prestamo())])
+        self.assertEqual(sum(m for _, m in cargos), Decimal('3371.90'))
+        self.assertEqual(p.saldo_actual, Decimal('89371.90'))
+
+    def test_pagar_tarde_o_en_el_corte_da_el_mismo_resultado(self):
+        """La fecha exacta dentro del atraso no decide a qué período se cobra."""
+        tarde = self._cargos(self._prestamo())
+        original = list(self.PAGOS)
+        try:
+            self.PAGOS = sorted(
+                date(2026, 8, 28) if f == date(2026, 8, 31) else f for f in original)
+            a_tiempo = self._cargos(self._prestamo())
+        finally:
+            self.PAGOS = original
+        self.assertEqual(tarde, a_tiempo)
+
+    def test_un_prestamo_al_corriente_no_devenga(self):
+        """Control: pagando cada corte no hay cargos, pese a la regla FIFO."""
+        p = Prestamo.objects.create(nombre_cliente='Al corriente', **self.PARAMS)
+        f = self.PARAMS['fecha_inicio']
+        for _ in range(12):
+            f = f + relativedelta(months=1)
+            Movimiento.objects.create(
+                prestamo=p, fecha=f, monto=self.CUOTA, tipo='pago')
+        p.actualizar_saldo(f)
+        self.assertEqual(self._cargos(p), [])
+
+
+class CapitalizarInteresesTest(TestCase):
+    """Interés compuesto opcional: el interés no pagado engrosa la base siguiente.
+
+    Gobernado por `Prestamo.capitalizar_intereses` (default False) para no
+    alterar los préstamos ya registrados.
+
+    Usa un préstamo SINTÉTICO a propósito: aísla la fórmula de composición con
+    cifras redondas. El comportamiento sobre datos auténticos se verifica en
+    `PrestamoMarcoMarquezRealTest`.
+    """
+
+    CUOTA = Decimal('13000.00')
+    INICIO = date(2026, 1, 28)
+
+    def _prestamo(self, capitalizar, pagos=()):
+        p = Prestamo.objects.create(
+            nombre_cliente='Capitaliza',
+            monto_original=Decimal('400000.00'),
+            tasa_interes_anual=Decimal('22.00'),      # 1.8333 % mensual
+            tipo_pago='mensual', modo='fixed_payment',
+            pago_mensual=self.CUOTA, fecha_inicio=self.INICIO,
+            capitalizar_intereses=capitalizar,
+        )
+        for f in pagos:
+            Movimiento.objects.create(
+                prestamo=p, fecha=f, monto=self.CUOTA, tipo='pago')
+        return p
+
+    def _cargos(self, p):
+        return [(m.fecha, m.monto)
+                for m in p.movimientos.filter(tipo='interes_cargo').order_by('fecha')]
+
+    def test_default_es_false(self):
+        """Un préstamo nuevo no capitaliza salvo que se active."""
+        self.assertFalse(Prestamo._meta.get_field('capitalizar_intereses').default)
+
+    def test_apagado_conserva_la_base_plana(self):
+        """Sin capitalizar, tres períodos sin pago cobran siempre lo mismo."""
+        p = self._prestamo(capitalizar=False)
+        p.actualizar_saldo(date(2026, 4, 28))
+        self.assertEqual(self._cargos(p), [
+            (date(2026, 2, 28), Decimal('238.33')),
+            (date(2026, 3, 28), Decimal('238.33')),
+            (date(2026, 4, 28), Decimal('238.33')),
+        ])
+
+    def test_encendido_compone_sobre_los_intereses_acumulados(self):
+        """Cada período devenga sobre la cuota MÁS lo ya acumulado sin pagar."""
+        p = self._prestamo(capitalizar=True)
+        p.actualizar_saldo(date(2026, 4, 28))
+        self.assertEqual(self._cargos(p), [
+            # base 13000.00                      -> 238.33
+            (date(2026, 2, 28), Decimal('238.33')),
+            # base 13000.00 + 238.33 = 13238.33  -> 242.70
+            (date(2026, 3, 28), Decimal('242.70')),
+            # base 13000.00 + 481.03 = 13481.03  -> 247.15
+            (date(2026, 4, 28), Decimal('247.15')),
+        ])
+
+    def test_la_descripcion_desglosa_la_base(self):
+        p = self._prestamo(capitalizar=True)
+        p.actualizar_saldo(date(2026, 3, 28))
+        ultimo = p.movimientos.filter(tipo='interes_cargo').order_by('fecha').last()
+        self.assertEqual(
+            ultimo.descripcion,
+            'Interés sobre 13238.33 (cuota 13000.00 + intereses acumulados 238.33)',
+        )
+
+    def test_el_pago_liquida_primero_los_intereses(self):
+        """Cascada: intereses -> cuotas vencidas -> período en curso.
+
+        El período 1 se abona parcialmente (12,000 de 13,000): faltan 1,000 y
+        devenga 18.33. En el período 2 llega la cuota completa de 13,000 y la
+        cascada la reparte así:
+            18.33     -> intereses devengados
+            1,000.00  -> cuota vencida del período 1
+            11,981.67 -> cuota del período 2 (queda corta por 1,018.33)
+        Sin cascada el faltante sería 1,000.00 y el cargo 18.33; con ella la
+        base sube a 1,018.33 y el cargo a 18.67. Esa diferencia ES la cascada.
+        """
+        p = self._prestamo(capitalizar=True)
+        Movimiento.objects.create(
+            prestamo=p, fecha=date(2026, 2, 20),
+            monto=Decimal('12000.00'), tipo='pago')
+        Movimiento.objects.create(
+            prestamo=p, fecha=date(2026, 3, 20),
+            monto=Decimal('13000.00'), tipo='pago')
+        p.actualizar_saldo(date(2026, 3, 28))
+        self.assertEqual(self._cargos(p), [
+            (date(2026, 2, 28), Decimal('18.33')),   # 1000.00 * 0.0183333
+            (date(2026, 3, 28), Decimal('18.67')),   # 1018.33 * 0.0183333
+        ])
+
+    def test_el_adeudo_vencido_tiene_prioridad_sobre_la_cuota_corriente(self):
+        """Un pago tras un período en blanco salda lo vencido, no lo corriente."""
+        # Período 1 sin pago (cargo 238.33, adeudo 13,000). El pago del período 2
+        # cubre 238.33 de interés y 12,761.67 del adeudo: a la cuota corriente no
+        # llega nada, así que el período 2 devenga sobre los 13,000 completos.
+        p = self._prestamo(capitalizar=True, pagos=[date(2026, 3, 20)])
+        p.actualizar_saldo(date(2026, 3, 28))
+        self.assertEqual(self._cargos(p), [
+            (date(2026, 2, 28), Decimal('238.33')),
+            (date(2026, 3, 28), Decimal('238.33')),
+        ])
+
+    def test_capitalizar_no_altera_un_prestamo_al_corriente(self):
+        """Pagando puntual no hay cargos, capitalice o no."""
+        puntuales = [self.INICIO + relativedelta(months=n) for n in range(1, 4)]
+        con = self._prestamo(capitalizar=True, pagos=puntuales)
+        con.actualizar_saldo(date(2026, 4, 28))
+        sin = self._prestamo(capitalizar=False, pagos=puntuales)
+        sin.actualizar_saldo(date(2026, 4, 28))
+        self.assertEqual(self._cargos(con), [])
+        self.assertEqual(self._cargos(sin), [])
