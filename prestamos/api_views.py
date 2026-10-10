@@ -81,7 +81,7 @@ class PrestamoViewSet(viewsets.ModelViewSet):
 
     def retrieve(self, request, *args, **kwargs):
         prestamo = self.get_object()
-        prestamo.actualizar_saldo(timezone.now().date())
+        prestamo.actualizar_saldo(timezone.localdate())
         serializer = self.get_serializer(prestamo)
         return Response(serializer.data)
 

@@ -78,7 +78,7 @@ class Prestamo(models.Model):
     monto_original = models.DecimalField(max_digits=15, decimal_places=2)
     tasa_interes_anual = models.DecimalField(max_digits=5, decimal_places=2)
     tipo_pago = models.CharField(max_length=20, default='mensual')
-    fecha_inicio = models.DateField(default=datetime.date.today)
+    fecha_inicio = models.DateField(default=timezone.localdate)
     saldo_actual = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     pago_mensual = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
     plazo_meses = models.IntegerField(null=True, blank=True)
@@ -139,7 +139,7 @@ class Prestamo(models.Model):
             return self.saldo_actual
 
         if fecha_actual is None:
-            fecha_actual = datetime.date.today()
+            fecha_actual = timezone.localdate()
 
         from .calculator import get_period_rate_and_delta, quantize_money
 
@@ -307,7 +307,7 @@ class Prestamo(models.Model):
         menos según la longitud de los meses del camino.
         """
         if fecha_actual is None:
-            fecha_actual = datetime.date.today()
+            fecha_actual = timezone.localdate()
         if fecha_actual <= self.fecha_inicio:
             return 0
 
@@ -429,7 +429,7 @@ def registrar_auditoria(user, accion, modelo, objeto_id=None, detalle=''):
 
 class Movimiento(models.Model):
     prestamo = models.ForeignKey(Prestamo, on_delete=models.CASCADE, related_name='movimientos')
-    fecha = models.DateField(default=datetime.date.today)  # Corregido con datetime
+    fecha = models.DateField(default=timezone.localdate)  # Corregido con datetime
     monto = models.DecimalField(max_digits=15, decimal_places=2)
     tipo = models.CharField(
         max_length=20,
@@ -484,7 +484,7 @@ class Inversion(models.Model):
     )
     tipo = models.CharField(max_length=20, choices=TIPO_CHOICES, default=TIPO_DESCUENTO)
     monto_invertido = models.DecimalField(max_digits=15, decimal_places=2)
-    fecha_compra = models.DateField(default=datetime.date.today)
+    fecha_compra = models.DateField(default=timezone.localdate)
     tasa_anual = models.DecimalField(
         max_digits=6, decimal_places=3, default=Decimal('0'),
         help_text='Tasa nominal anual en %. No aplica a fondos.',
@@ -530,7 +530,7 @@ class Inversion(models.Model):
         from .portafolio import dias_transcurridos
         if self.es_fondo:
             return 0
-        return dias_transcurridos(self.fecha_compra, hasta or datetime.date.today(),
+        return dias_transcurridos(self.fecha_compra, hasta or timezone.localdate(),
                                   self.plazo_dias)
 
     def _suma(self, tipo):
@@ -570,7 +570,7 @@ class Inversion(models.Model):
         hubiera estado desde el inicio.
         """
         from .portafolio import valor_devengado, dias_transcurridos
-        hasta = hasta or datetime.date.today()
+        hasta = hasta or timezone.localdate()
 
         if self.valor_manual is not None:
             corte = self.fecha_valor or self.fecha_compra
@@ -621,13 +621,13 @@ class Inversion(models.Model):
     @property
     def vencida(self):
         vencimiento = self.fecha_vencimiento
-        return bool(vencimiento and vencimiento <= datetime.date.today())
+        return bool(vencimiento and vencimiento <= timezone.localdate())
 
     def dias_para_vencer(self, hasta=None):
         vencimiento = self.fecha_vencimiento
         if not vencimiento:
             return None
-        return (vencimiento - (hasta or datetime.date.today())).days
+        return (vencimiento - (hasta or timezone.localdate())).days
 
 
 class MovimientoInversion(models.Model):
@@ -646,7 +646,7 @@ class MovimientoInversion(models.Model):
     ]
 
     inversion = models.ForeignKey(Inversion, on_delete=models.CASCADE, related_name='movimientos')
-    fecha = models.DateField(default=datetime.date.today)
+    fecha = models.DateField(default=timezone.localdate)
     monto = models.DecimalField(max_digits=15, decimal_places=2)
     tipo = models.CharField(max_length=20, choices=TIPO_CHOICES)
     descripcion = models.CharField(max_length=200, blank=True)

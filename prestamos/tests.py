@@ -10,12 +10,15 @@ Cubre:
 - Pagos, incrementos y saldo cero → inactivación
 """
 
+import datetime
+from unittest import mock
 from decimal import Decimal, localcontext
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 
 from io import BytesIO, StringIO
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -2311,3 +2314,51 @@ class CapitalizarInteresesTest(TestCase):
         sin.actualizar_saldo(date(2026, 4, 28))
         self.assertEqual(self._cargos(con), [])
         self.assertEqual(self._cargos(sin), [])
+class ZonaHorariaLocalTest(TestCase):
+    """Las fechas se resuelven en la zona del usuario, no en UTC.
+
+    Caso real: un pago registrado el 9 oct 2026 a las 17:44 de Tijuana quedó
+    guardado con fecha 10 oct, porque `timezone.now().date()` devuelve la fecha
+    UTC (ya era 00:44 del día siguiente) y `datetime.date.today()` la del reloj
+    del contenedor, que en Railway corre en UTC.
+    """
+
+    # 2026-10-10 00:44 UTC == 2026-10-09 17:44 en Tijuana (PDT, UTC-7).
+    INSTANTE_UTC = datetime.datetime(2026, 10, 10, 0, 44, tzinfo=datetime.timezone.utc)
+
+    def test_settings_usa_la_zona_del_usuario(self):
+        self.assertEqual(settings.TIME_ZONE, 'America/Tijuana')
+        self.assertTrue(settings.USE_TZ)
+
+    def test_localdate_devuelve_el_dia_local_no_el_utc(self):
+        with mock.patch('django.utils.timezone.now', return_value=self.INSTANTE_UTC):
+            self.assertEqual(timezone.now().date(), date(2026, 10, 10))   # UTC
+            self.assertEqual(timezone.localdate(), date(2026, 10, 9))     # Tijuana
+
+    def test_el_default_de_movimiento_usa_la_fecha_local(self):
+        """Un pago capturado a las 17:44 de Tijuana se guarda con la fecha de ese día."""
+        p = Prestamo.objects.create(
+            nombre_cliente='TZ', monto_original=Decimal('1000.00'),
+            tasa_interes_anual=Decimal('0'), tipo_pago='mensual',
+            modo='fixed_payment', pago_mensual=Decimal('100.00'),
+            fecha_inicio=date(2026, 1, 1),
+        )
+        with mock.patch('django.utils.timezone.now', return_value=self.INSTANTE_UTC):
+            m = Movimiento.objects.create(
+                prestamo=p, monto=Decimal('100.00'), tipo='pago')
+        self.assertEqual(m.fecha, date(2026, 10, 9))
+
+    def test_ningun_modulo_usa_la_fecha_utc(self):
+        """Guarda contra reintroducir `date.today()` o `timezone.now().date()`."""
+        import re
+        from pathlib import Path
+        raiz = Path(__file__).resolve().parent
+        patron = re.compile(r'(?<![\w.])date\.today\(\)|timezone\.now\(\)\.date\(\)')
+        ofensores = []
+        for f in raiz.glob('*.py'):
+            if f.name.startswith('test'):
+                continue
+            for n, linea in enumerate(f.read_text().splitlines(), 1):
+                if patron.search(linea):
+                    ofensores.append(f'{f.name}:{n}')
+        self.assertEqual(ofensores, [], f'usar timezone.localdate() en: {ofensores}')
