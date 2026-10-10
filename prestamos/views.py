@@ -57,7 +57,7 @@ def _csv_safe(value):
 @login_required
 def home(request):
     """Dashboard principal con KPIs y accesos rápidos."""
-    hoy = timezone.now().date()
+    hoy = timezone.localdate()
 
     # KPIs básicos — registros visibles (los propios; todos si es admin)
     visibles = prestamos_visibles(request.user)
@@ -159,7 +159,7 @@ def lista_prestamos(request):
     paginator = Paginator(prestamos, PRESTAMOS_POR_PAGINA)
     page = paginator.get_page(request.GET.get('page'))
 
-    hoy = timezone.now().date()
+    hoy = timezone.localdate()
     suma_saldos = Decimal('0.00')
     for prestamo in page.object_list:
         prestamo.actualizar_saldo(hoy)
@@ -242,7 +242,7 @@ class CalculadoraView(LoginRequiredMixin, View):
                 'tasa': tasa,
                 'pago_mensual': calculated_payment,
                 'plazo_meses': calculated_term if isinstance(calculated_term, int) else None,
-                'fecha_inicio': date.today(),
+                'fecha_inicio': timezone.localdate(),
             })
 
         if 'register' in request.POST:
@@ -302,7 +302,7 @@ class RegistrarPrestamoView(LoginRequiredMixin, View):
             # validación de "Pago Fijo", que era lo que bloqueaba el alta.
             'pago_mensual': calc_data.get('pago_mensual'),
             'modo': calc_data.get('modo', 'fixed_term'),
-            'fecha_inicio': date.today(),
+            'fecha_inicio': timezone.localdate(),
         }
         form = RegistrarPrestamoForm(initial=initial)
         return render(request, 'prestamos/registrar_prestamo.html', {
@@ -385,7 +385,7 @@ class PrestamoDetailView(LoginRequiredMixin, DetailView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         prestamo = self.object
-        hoy = timezone.now().date()
+        hoy = timezone.localdate()
         prestamo.actualizar_saldo(hoy)  # Punto 5: Actualiza saldo diario
         movimientos = prestamo.movimientos.order_by('fecha')
         amortizacion = prestamo.get_amortizacion()
@@ -419,7 +419,7 @@ def registrar_pago(request, prestamo_id):
                         tipo='pago',
                         descripcion=form.cleaned_data.get('descripcion', 'Pago registrado')
                     )
-                    prestamo.actualizar_saldo(timezone.now().date())
+                    prestamo.actualizar_saldo(timezone.localdate())
                     registrar_auditoria(request.user, 'pago', 'Prestamo', prestamo.pk,
                                         f"${form.cleaned_data['monto']} el {form.cleaned_data['fecha']}")
                     messages.success(request, "Pago registrado exitosamente.")
@@ -667,7 +667,7 @@ def registrar_inversion(request):
             inversion_inicial = form.cleaned_data['inversionInicial']
             tasa_descuento = form.cleaned_data['tasaDescuento']
             anos = form.cleaned_data['anos']
-            fecha_base = form.cleaned_data.get('fecha_inicio_simulacion') or timezone.now().date()
+            fecha_base = form.cleaned_data.get('fecha_inicio_simulacion') or timezone.localdate()
 
             with transaction.atomic():
                 cliente = Cliente.objects.create(owner=request.user, nombre="Inversión Automática", telefono="N/A")
@@ -930,7 +930,7 @@ def export_prestamo_pdf(request, pk):
 @login_required
 def portafolio(request):
     """Dashboard consolidado del portafolio."""
-    hoy = timezone.now().date()
+    hoy = timezone.localdate()
     posiciones = list(inversiones_visibles(request.user).filter(activa=True))
 
     total_invertido = Decimal('0.00')
@@ -1028,7 +1028,7 @@ def nueva_inversion(request):
 @login_required
 def detalle_inversion(request, pk):
     inversion = get_object_or_404(inversiones_visibles(request.user), pk=pk)
-    hoy = timezone.now().date()
+    hoy = timezone.localdate()
     return render(request, 'prestamos/detalle_inversion.html', {
         'inversion': inversion,
         'capital_invertido': inversion.capital_invertido,
@@ -1322,7 +1322,7 @@ def _crear_registros(user, tipo, filas, destino):
                        descripcion=f.get('descripcion', ''))
             for f in filas
         ])
-        destino.actualizar_saldo(timezone.now().date())
+        destino.actualizar_saldo(timezone.localdate())
         return len(filas)
 
     if tipo == 'movimientos_inversion':

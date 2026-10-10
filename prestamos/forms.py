@@ -1,4 +1,5 @@
 from django import forms
+from django.utils import timezone
 from decimal import Decimal
 from datetime import date
 
@@ -356,4 +357,4 @@ class MovimientoInversionForm(forms.Form):
     descripcion = forms.CharField(max_length=200, required=False)
 
     def clean_fecha(self):
-        return self.cleaned_data.get('fecha') or date.today()
+        return self.cleaned_data.get('fecha') or timezone.localdate()

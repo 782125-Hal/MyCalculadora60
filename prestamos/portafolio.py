@@ -19,6 +19,8 @@ Convenciones:
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import date
 
+from django.utils import timezone
+
 CENTAVOS = Decimal('0.01')
 
 BASE_MERCADO_DINERO = 360  # convención Banxico para CETES
@@ -32,7 +34,7 @@ def quantize_money(value: Decimal) -> Decimal:
 def dias_transcurridos(fecha_compra: date, hasta: date, plazo_dias: int) -> int:
     """Días devengados, acotados al plazo: una posición vencida no sigue creciendo."""
     if hasta is None:
-        hasta = date.today()
+        hasta = timezone.localdate()
     transcurridos = (hasta - fecha_compra).days
     if transcurridos < 0:
         return 0

@@ -15,6 +15,8 @@ from dateutil.relativedelta import relativedelta
 from datetime import date
 from typing import Literal, Optional, List, Dict, Any
 
+from django.utils import timezone
+
 PeriodType = Literal['mensual', 'semanal']
 LoanMode = Literal['fixed_term', 'fixed_payment']
 
@@ -127,7 +129,7 @@ def build_amortization_schedule(
     Todo el cálculo interno usa Decimal.
     """
     if fecha_inicio is None:
-        fecha_inicio = date.today()
+        fecha_inicio = timezone.localdate()
 
     balance = Decimal(str(monto))
     delta, tasa_periodo = _get_delta_and_period_rate(tasa_anual, tipo_pago)
