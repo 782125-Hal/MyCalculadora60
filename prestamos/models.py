@@ -158,6 +158,12 @@ class Prestamo(models.Model):
             num_mov = len(movimientos)
             pago_minimo = self.pago_mensual or Decimal('0')
 
+            # Cuotas de períodos ya vencidos que siguen sin cubrirse. Un pago
+            # salda primero este adeudo y sólo el excedente acredita el período
+            # en curso: quien paga el día 31 está liquidando el corte del 28 que
+            # ya venció, no adelantando el corte siguiente.
+            adeudo_vencido = Decimal('0')
+
             # 0) Movimientos con fecha anterior o igual al inicio del préstamo.
             # Se aplican al balance pero no pertenecen a ningún período. Sin este
             # consumo previo el cursor se quedaba atascado en ellos —la condición
@@ -190,12 +196,23 @@ class Prestamo(models.Model):
                         balance += mov.monto
                     mov_index += 1
 
+                # Un pago liquida primero las cuotas vencidas y sólo lo que
+                # sobra acredita el período en curso. Sin esta imputación, un
+                # pago hecho pocos días DESPUÉS del corte caía por fecha en la
+                # ventana siguiente y la daba por cubierta, de modo que el
+                # período que realmente quedó sin pago nunca devengaba interés.
+                abono_a_vencido = min(suma_pagos_periodo, adeudo_vencido)
+                adeudo_vencido -= abono_a_vencido
+                acredita_periodo = suma_pagos_periodo - abono_a_vencido
+
                 # Interés sobre el faltante del período, no sobre la mensualidad
                 # entera: si la cuota es 3,975 y se abonaron 3,000, el interés
                 # corre sólo sobre los 975 restantes. Se suma al capital.
                 # pago_minimo 0 (pago_mensual None/0) => faltante <= 0 => nunca cobra.
                 if fecha_esperada <= fecha_actual:
-                    faltante = pago_minimo - suma_pagos_periodo
+                    faltante = pago_minimo - acredita_periodo
+                    if faltante > 0:
+                        adeudo_vencido += faltante
                     intereses = quantize_money(faltante * tasa_periodo) if faltante > 0 else Decimal('0.00')
                     # Un cargo de 0 no aporta información y ensucia el historial:
                     # ocurre con tasa 0% o cuando el faltante redondea por debajo

@@ -2053,3 +2053,95 @@ class PagosRestantesTest(TestCase):
         semanas = p.periodos_transcurridos()
         self.assertGreater(semanas, 40)
         self.assertEqual(p.plazo_meses, semanas + 10)
+
+
+class PagoTardioImputaPeriodoVencidoTest(TestCase):
+    """Un pago posterior al corte liquida el período VENCIDO, no el siguiente.
+
+    Caso real reportado (préstamo con corte el día 28 y cuota de 13,000 al 22%
+    anual): el pago del 31 de agosto —tres días después del corte del 28— caía
+    por fecha en la ventana (28 ago, 28 sep] y la daba por cubierta, de modo que
+    septiembre, que realmente quedó sin pago, nunca devengaba su cargo.
+    """
+
+    CUOTA = Decimal('13000.00')
+    CARGO = Decimal('238.33')          # 13000 * (22% / 12)
+    INICIO = date(2026, 1, 28)
+    CORTE_FINAL = date(2026, 10, 10)
+
+    def _prestamo(self, fechas_de_pago):
+        p = Prestamo.objects.create(
+            nombre_cliente='Corte dia 28',
+            monto_original=Decimal('400000.00'),
+            tasa_interes_anual=Decimal('22.00'),
+            tipo_pago='mensual', modo='fixed_payment',
+            pago_mensual=self.CUOTA, fecha_inicio=self.INICIO,
+        )
+        for f in fechas_de_pago:
+            Movimiento.objects.create(
+                prestamo=p, fecha=f, monto=self.CUOTA, tipo='pago',
+            )
+        p.actualizar_saldo(self.CORTE_FINAL)
+        return p
+
+    def _cargos(self, prestamo):
+        return [
+            (m.fecha, m.monto)
+            for m in prestamo.movimientos.filter(tipo='interes_cargo').order_by('fecha')
+        ]
+
+    # Historial real del préstamo reportado.
+    PAGOS_REALES = [
+        date(2026, 2, 24),   # cubre (28 ene, 28 feb]
+        date(2026, 3, 24),   # cubre (28 feb, 28 mar]
+        date(2026, 4, 29),   # TARDE: liquida el corte del 28 abr ya vencido
+        date(2026, 5, 25),   # cubre (28 abr, 28 may]
+        date(2026, 8, 31),   # TARDE: liquida el corte del 28 ago ya vencido
+        date(2026, 10, 10),  # período en curso, aún no cierra
+    ]
+
+    def test_tabla_de_cargos_periodo_por_periodo(self):
+        """Tabla esperada completa: un cargo por cada corte sin pago."""
+        p = self._prestamo(self.PAGOS_REALES)
+        self.assertEqual(self._cargos(p), [
+            (date(2026, 4, 28), self.CARGO),   # marzo-abril sin pago
+            (date(2026, 6, 28), self.CARGO),   # mayo-junio sin pago
+            (date(2026, 7, 28), self.CARGO),   # junio-julio sin pago
+            (date(2026, 8, 28), self.CARGO),   # julio-agosto sin pago
+            (date(2026, 9, 28), self.CARGO),   # agosto-septiembre sin pago (regresión)
+        ])
+
+    def test_septiembre_devenga_pese_al_pago_del_31_de_agosto(self):
+        """El bug reportado: faltaba justamente este cargo."""
+        p = self._prestamo(self.PAGOS_REALES)
+        fechas = [f for f, _ in self._cargos(p)]
+        self.assertIn(date(2026, 9, 28), fechas)
+
+    def test_pagar_tarde_o_en_el_corte_da_el_mismo_resultado(self):
+        """La fecha exacta dentro del atraso no debe mover a qué período se cobra."""
+        tarde = self._prestamo(self.PAGOS_REALES)
+        a_tiempo = self._prestamo(
+            [date(2026, 8, 28) if f == date(2026, 8, 31) else f
+             for f in self.PAGOS_REALES]
+        )
+        self.assertEqual(self._cargos(tarde), self._cargos(a_tiempo))
+
+    def test_pago_puntual_no_genera_cargo(self):
+        """Control: pagando cada corte no hay ningún cargo."""
+        puntuales = [
+            self.INICIO + relativedelta(months=n) for n in range(1, 9)
+        ]
+        p = self._prestamo(puntuales)
+        self.assertEqual(self._cargos(p), [])
+
+    def test_sobrepago_no_adelanta_periodos_futuros(self):
+        """Pagar doble en un corte salda lo vencido, no acredita cortes futuros."""
+        p = self._prestamo([
+            date(2026, 2, 24),
+            date(2026, 3, 24),
+            date(2026, 4, 28), date(2026, 4, 28),  # doble cuota en un solo corte
+        ])
+        fechas = [f for f, _ in self._cargos(p)]
+        # El corte de mayo en adelante sigue sin pago => sí devenga.
+        self.assertIn(date(2026, 5, 28), fechas)
+
